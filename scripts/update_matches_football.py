@@ -1,6 +1,5 @@
 import json
 import re
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -22,7 +21,7 @@ COMPETITIONS = [
     {"level": "R2", "competition": "R2 - Poule C", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/3"},
     {"level": "R2", "competition": "R2 - Poule D", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/4"},
     {"level": "R3", "competition": "R3 - Poule A", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/1"},
-    {"level": "R3", "competition": "R3 - Poule B", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/2"},
+    {"level": "R3", "competition": "R3 - Poule B", "competition": "R3 - Poule B", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/2"},
     {"level": "R3", "competition": "R3 - Poule C", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/3"},
     {"level": "R3", "competition": "R3 - Poule D", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/4"},
     {"level": "R3", "competition": "R3 - Poule E", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/5"},
@@ -33,7 +32,7 @@ COMPETITIONS = [
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "match-radar-hdf (github actions) - contact: example@example.com"
+    "User-Agent": "match-radar-hdf (github actions)"
 })
 
 MONTHS = {
@@ -43,6 +42,12 @@ MONTHS = {
 
 DATE_RE = re.compile(
     r"^(lun|mar|mer|jeu|ven|sam|dim)\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})$",
+    re.IGNORECASE
+)
+
+# 👉 On récupère les équipes via les liens "equipe"
+TEAM_ANCHOR_RE = re.compile(
+    r'href="[^"]*/competition/equipe/[^"]*"[^>]*>\s*([^<]{2,80}?)\s*</a>',
     re.IGNORECASE
 )
 
@@ -76,93 +81,90 @@ def parse_fr_datetime(s: str) -> datetime | None:
         return None
     return datetime(year, mon, day, hh, mm, tzinfo=PARIS)
 
-def extract_match_links(calendar_html: str) -> list[str]:
-    links = set()
-    for m in re.finditer(r'href="(/competition/match/[^"]+)"', calendar_html):
-        links.add("https://epreuves.fff.fr" + m.group(1))
-    return sorted(links)
-
-def parse_match_page(url: str) -> dict | None:
-    html = fetch(url)
-
-    # Date/heure : "sam 07 fév 2026 - 18h30"
-    dt = None
-    for line in re.findall(r">([^<]{10,50}-\s*\d{1,2}h\d{2})<", html):
-        dt = parse_fr_datetime(line)
-        if dt:
-            break
-
-    # Équipes : <title> Le match | HOME - AWAY
-    title = re.search(r"<title>\s*Le match\s*\|\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
-    if not title:
-        return None
-    t = title.group(1)
-    if " - " not in t:
-        return None
-    home, away = [x.strip() for x in t.split(" - ", 1)]
-
-    if not dt:
-        return None
-
-    return {
-        "starts_at": dt,
-        "home_team": home,
-        "away_team": away,
-        "source_url": url,
-    }
-
 def weekend_window_for(dt: datetime) -> tuple[datetime, datetime]:
-    # Fenêtre samedi 00:00 -> dimanche 23:59:59 (heure de Paris)
-    # dt.weekday(): lundi=0 ... dimanche=6
+    # samedi 00:00 -> dimanche 23:59:59
     saturday = dt.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=(dt.weekday() - 5) % 7)
     sunday_end = saturday + timedelta(days=1, hours=23, minutes=59, seconds=59)
     return saturday, sunday_end
 
+def extract_matches_from_calendar(html: str) -> list[tuple[datetime, str, str]]:
+    """
+    On parse la page calendrier :
+    - on récupère toutes les dates/heure "sam 07 fév 2026 - 18h00"
+    - juste après, dans le flux HTML, on récupère les 2 prochains noms d'équipe (domicile/extérieur)
+    """
+    matches = []
+
+    # 1) On transforme le HTML en une suite de "tokens" texte :
+    #    On repère les dates avec un regex sur le texte brut,
+    #    et on récupère les équipes avec un regex sur les <a .../equipe/...>Nom</a>
+    #
+    # Astuce simple : on remplace "<" par "\n<" pour casser les gros blocs
+    html2 = html.replace("<", "\n<")
+
+    # 2) Extraire toutes les occurrences de dates (dans le texte)
+    # On récupère des lignes proches de ce que tu vois à l'écran
+    text_lines = [re.sub(r"<[^>]+>", "", line).strip() for line in html2.splitlines()]
+    text_lines = [x for x in text_lines if x]
+
+    # 3) Extraire les équipes (dans l'ordre d'apparition dans le HTML)
+    teams = TEAM_ANCHOR_RE.findall(html)
+    team_idx = 0
+
+    for line in text_lines:
+        dt = parse_fr_datetime(line)
+        if not dt:
+            continue
+
+        # On prend les deux prochains noms d'équipes trouvés dans le HTML
+        if team_idx + 1 < len(teams):
+            home = teams[team_idx].strip()
+            away = teams[team_idx + 1].strip()
+            team_idx += 2
+
+            # évite quelques faux positifs
+            if len(home) >= 2 and len(away) >= 2:
+                matches.append((dt, home, away))
+
+    return matches
+
 def main():
     now = datetime.now(PARIS)
-    future = []  # liste de tuples (dt, comp, mp)
 
-    # 1) Collecter les matchs à venir (sans filtrer sur un week-end fixe)
+    future = []  # (dt, comp, home, away)
+
     for comp in COMPETITIONS:
-        cal_html = fetch(comp["calendar_url"])
-        match_urls = extract_match_links(cal_html)
+        html = fetch(comp["calendar_url"])
+        parsed = extract_matches_from_calendar(html)
 
-        for mu in match_urls[:120]:
-            mp = parse_match_page(mu)
-            if not mp:
-                continue
-
-            dt = mp["starts_at"]
+        for dt, home, away in parsed:
             if dt >= now:
-                future.append((dt, comp, mp))
-
-            time.sleep(0.15)
+                future.append((dt, comp, home, away))
 
     future.sort(key=lambda x: x[0])
 
     items = []
 
-    # 2) Prendre le premier week-end qui contient au moins un match
     if future:
         first_dt = future[0][0]
         window_start, window_end = weekend_window_for(first_dt)
 
-        for dt, comp, mp in future:
+        for dt, comp, home, away in future:
             if window_start <= dt <= window_end:
                 items.append({
                     "sport": "football",
                     "level": comp["level"],
                     "starts_at": dt.isoformat(),
                     "competition": comp["competition"],
-                    "home_team": mp["home_team"],
-                    "away_team": mp["away_team"],
+                    "home_team": home,
+                    "away_team": away,
                     "venue": {
                         "name": "Stade (à géolocaliser)",
                         "city": "",
                         "lat": 49.8489,
                         "lon": 3.2876
                     },
-                    "source_url": mp["source_url"]
+                    "source_url": comp["calendar_url"]
                 })
 
     items.sort(key=lambda x: x["starts_at"])
