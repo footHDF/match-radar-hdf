@@ -92,18 +92,19 @@ def parse_match_page(url: str) -> dict | None:
     html = fetch(url)
 
     # 1) Date/heure : souvent en haut de page en clair (ex: "sam 07 fév 2026 - 14h00")
-    dt = None
-   for line in re.findall(
-    r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+\d{1,2}\s+[a-zéûôîàç\.]+\s+\d{4}\s+-\s+\d{1,2}h(?:\d{2})?\b",
-    html,
-    flags=re.IGNORECASE
-):
-    dt = parse_fr_datetime(line)
-    if dt:
-        break
+       dt = None
+       for line in re.findall(
+        r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+\d{1,2}\s+[a-zéûôîàç\.]+\s+\d{4}\s+-\s+\d{1,2}h(?:\d{2})?\b",
+        html,
+        flags=re.IGNORECASE
+    ):
+        dt = parse_fr_datetime(line)
+        if dt:
+            break
 
     if not dt:
         return None
+
 
     # 2) Équipes depuis le <title> : "Le match | HOME - AWAY"
     title = re.search(r"<title>\s*Le match\s*\|\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
@@ -203,7 +204,6 @@ if not mp:
 
 parsed_ok += 1
 
-
             dt = mp["starts_at"]
             if not (window_start <= dt <= window_end):
                 continue
@@ -234,6 +234,7 @@ parsed_ok += 1
     save_json(OUT, out)
 
     print(f"[INFO] parse_match_page ok={parsed_ok} fail={parsed_fail}")
+    print(f"[OK] items={len(items)}")
 
 if __name__ == "__main__":
     main()
