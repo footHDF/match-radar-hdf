@@ -33,7 +33,7 @@ COMPETITIONS = [
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "match-radar-hdf (github actions) - contact: example@example.com",
+    "User-Agent": "match-radar-hdf (github actions)",
     "Accept-Language": "fr-FR,fr;q=0.9",
 })
 
@@ -42,13 +42,17 @@ MONTHS = {
     "juil": 7, "aoû": 8, "aou": 8, "sept": 9, "oct": 10, "nov": 11, "déc": 12, "dec": 12
 }
 
+# accepte "sam" ou "sam." + minutes optionnelles "18h" ou "18h00"
 DATE_RE = re.compile(
     r"^(lun|mar|mer|jeu|ven|sam|dim)\.?\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})?$",
     re.IGNORECASE
 )
 
 # On attrape les URLs de match même si ce n’est pas un href classique
-MATCH_URL_RE = re.compile(r"(https://epreuves\.fff\.fr)?(/competition/match/\d+[^\"'\s<]+)", re.IGNORECASE)
+MATCH_URL_RE = re.compile(
+    r"(https://epreuves\.fff\.fr)?(/competition/match/\d+[^\"'\s<]+)",
+    re.IGNORECASE
+)
 
 def load_json(path: Path, default):
     if path.exists():
@@ -70,15 +74,18 @@ def parse_fr_datetime(s: str) -> datetime | None:
     m = DATE_RE.match(s)
     if not m:
         return None
+
     day = int(m.group(2))
     mon_txt = m.group(3).strip(".")
     year = int(m.group(4))
     hh = int(m.group(5))
     mm_txt = m.group(6)
     mm = int(mm_txt) if mm_txt is not None else 0
+
     mon = MONTHS.get(mon_txt)
     if not mon:
         return None
+
     return datetime(year, mon, day, hh, mm, tzinfo=PARIS)
 
 def extract_match_links(html: str) -> list[str]:
@@ -91,9 +98,9 @@ def extract_match_links(html: str) -> list[str]:
 def parse_match_page(url: str) -> dict | None:
     html = fetch(url)
 
-    # 1) Date/heure : souvent en haut de page en clair (ex: "sam 07 fév 2026 - 14h00")
-       dt = None
-       for line in re.findall(
+    # date/heure dans la page (souple : "sam." + "18h" possible)
+    dt = None
+    for line in re.findall(
         r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+\d{1,2}\s+[a-zéûôîàç\.]+\s+\d{4}\s+-\s+\d{1,2}h(?:\d{2})?\b",
         html,
         flags=re.IGNORECASE
@@ -105,24 +112,29 @@ def parse_match_page(url: str) -> dict | None:
     if not dt:
         return None
 
-
-    # 2) Équipes depuis le <title> : "Le match | HOME - AWAY"
+    # équipes depuis le <title> : "Le match | HOME - AWAY"
     title = re.search(r"<title>\s*Le match\s*\|\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
     if not title:
         return None
+
     t = title.group(1)
     if " - " not in t:
         return None
+
     home, away = [x.strip() for x in t.split(" - ", 1)]
 
-    # 3) Stade + adresse (optionnel)
+    # stade + ville (optionnel, on ne bloque pas si absent)
     venue_name = ""
     venue_city = ""
-    m_venue = re.search(r"##\s*Lieu de la rencontre\s*(?:\s|.){0,200}?\s*([A-Z0-9 \-’'ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ]+)\s*(?:\s|.){0,200}?\s*(\d{1,4}\s+[^<\n]+?\s+\d{5}\s+([A-ZÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ \-’']+))", html, re.IGNORECASE)
+
+    m_venue = re.search(
+        r"Lieu de la rencontre[\s\S]{0,2500}?\b([A-Z0-9 \-’'ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ]{5,})\b[\s\S]{0,2500}?\b\d{5}\b[\s\-]*([A-ZÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ \-’']+)\b",
+        html,
+        re.IGNORECASE
+    )
     if m_venue:
         venue_name = m_venue.group(1).strip()
-        # ville = 3e groupe (souvent tout en majuscules)
-        venue_city = m_venue.group(3).strip().title()
+        venue_city = m_venue.group(2).strip().title()
 
     return {
         "starts_at": dt,
@@ -134,18 +146,12 @@ def parse_match_page(url: str) -> dict | None:
     }
 
 def extra_pages(calendar_url: str) -> list[str]:
-    """
-    On essaye plusieurs pages :
-    - l’URL donnée
-    - si elle finit par /resultats-et-calendrier => on ajoute la version sans ce suffixe
-    - si elle ne finit pas par /resultats-et-calendrier => on ajoute la version avec
-    """
     urls = [calendar_url]
     if calendar_url.endswith("/resultats-et-calendrier"):
         urls.append(calendar_url.replace("/resultats-et-calendrier", ""))
     else:
         urls.append(calendar_url.rstrip("/") + "/resultats-et-calendrier")
-    # dédup
+
     out = []
     for u in urls:
         if u not in out:
@@ -184,25 +190,23 @@ def main():
         if not comp_match_urls:
             continue
 
-        # On limite pour éviter trop de requêtes
         for mu in comp_match_urls[:180]:
             if mu in seen_match_urls:
                 continue
             seen_match_urls.add(mu)
 
-           mp = None
-try:
-    mp = parse_match_page(mu)
-except Exception as e:
-    print(f"[WARN] parse match KO: {mu} ({e})")
-    parsed_fail += 1
-    continue
+            try:
+                mp = parse_match_page(mu)
+            except Exception as e:
+                print(f"[WARN] parse match KO: {mu} ({e})")
+                parsed_fail += 1
+                continue
 
-if not mp:
-    parsed_fail += 1
-    continue
+            if not mp:
+                parsed_fail += 1
+                continue
 
-parsed_ok += 1
+            parsed_ok += 1
 
             dt = mp["starts_at"]
             if not (window_start <= dt <= window_end):
@@ -218,13 +222,13 @@ parsed_ok += 1
                 "venue": {
                     "name": mp.get("venue_name") or "Stade (à compléter)",
                     "city": mp.get("venue_city") or "",
-                    "lat": 49.8489,   # provisoire (Saint-Quentin)
+                    "lat": 49.8489,  # provisoire (Saint-Quentin)
                     "lon": 3.2876
                 },
                 "source_url": mp["source_url"]
             })
 
-            time.sleep(0.15)
+            time.sleep(0.12)
 
     items.sort(key=lambda x: x["starts_at"])
 
@@ -234,8 +238,7 @@ parsed_ok += 1
     save_json(OUT, out)
 
     print(f"[INFO] parse_match_page ok={parsed_ok} fail={parsed_fail}")
-    print(f"[OK] items={len(items)}")
+    print(f"[OK] items={len(items)} (écrits dans matches.json)")
 
 if __name__ == "__main__":
     main()
-
