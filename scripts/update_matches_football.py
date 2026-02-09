@@ -43,7 +43,7 @@ MONTHS = {
 }
 
 DATE_RE = re.compile(
-    r"^(lun|mar|mer|jeu|ven|sam|dim)\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})$",
+    r"^(lun|mar|mer|jeu|ven|sam|dim)\.?\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})?$",
     re.IGNORECASE
 )
 
@@ -74,7 +74,8 @@ def parse_fr_datetime(s: str) -> datetime | None:
     mon_txt = m.group(3).strip(".")
     year = int(m.group(4))
     hh = int(m.group(5))
-    mm = int(m.group(6))
+    mm_txt = m.group(6)
+    mm = int(mm_txt) if mm_txt is not None else 0
     mon = MONTHS.get(mon_txt)
     if not mon:
         return None
@@ -154,6 +155,8 @@ def main():
 
     items = []
     seen_match_urls = set()
+    parsed_ok = 0
+    parsed_fail = 0
 
     for comp in COMPETITIONS:
         urls_to_try = extra_pages(comp["calendar_url"])
@@ -184,10 +187,13 @@ def main():
             mp = None
             try:
                 mp = parse_match_page(mu)
+                parsed_ok += 1
+
             except Exception as e:
                 print(f"[WARN] parse match KO: {mu} ({e})")
 
             if not mp:
+                parsed_fail += 1
                 continue
 
             dt = mp["starts_at"]
@@ -219,7 +225,7 @@ def main():
     out["items"] = items
     save_json(OUT, out)
 
-    print(f"[OK] items={len(items)} (écrits dans matches.json)")
+    print(f"[INFO] parse_match_page ok={parsed_ok} fail={parsed_fail}")
 
 if __name__ == "__main__":
     main()
