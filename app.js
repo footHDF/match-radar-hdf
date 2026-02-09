@@ -130,7 +130,7 @@ async function boot() {
   const ok = initMap();
   if (!ok) return;
 
-  // ✅ Affiche immédiatement avec la position par défaut (Lille)
+  // ✅ Affiche immédiatement avec la position par défaut (Saint-Quentin)
     await loadMatches();
 
   render();
@@ -139,7 +139,7 @@ async function boot() {
   let geoFinished = false;
   setTimeout(() => {
     if (!geoFinished) {
-      showMsg("Géolocalisation trop lente ou bloquée : affichage sur Lille (par défaut).");
+      showMsg("Géolocalisation trop lente ou bloquée : affichage de Saint-Quentin (par défaut).");
       // render() déjà fait, donc rien à faire de plus
     }
   }, 3000);
@@ -156,13 +156,13 @@ async function boot() {
       },
       () => {
         geoFinished = true;
-        showMsg("Position refusée : j'utilise Lille par défaut.");
+        showMsg("Position refusée : j'utilise Saint-Quentin par défaut.");
         // render() déjà fait
       },
       { enableHighAccuracy: true, timeout: 3000, maximumAge: 60000 }
     );
   } else {
-    showMsg("Géolocalisation indisponible : j'utilise Lille par défaut.");
+    showMsg("Géolocalisation indisponible : j'utilise Saint-Quentin par défaut.");
     // render() déjà fait
   }
 
@@ -172,4 +172,5 @@ async function boot() {
 
 
 window.addEventListener("load", boot);
+
 
