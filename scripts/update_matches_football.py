@@ -8,17 +8,95 @@ import requests
 OUT = Path("matches.json")
 
 COMPETITIONS = [
+    # N2 / N3 (tes liens)
     {
         "level": "N2",
         "competition": "National 2 - Poule B",
-        "url": "https://epreuves.fff.fr/competition/engagement/439451-n2/phase/1/2/resultats-et-calendrier"
+        "url": "https://epreuves.fff.fr/competition/engagement/439451-n2/phase/1/2/resultats-et-calendrier",
     },
     {
         "level": "N3",
         "competition": "National 3 - Poule E",
-        "url": "https://epreuves.fff.fr/competition/engagement/439452-n3/phase/1/5/resultats-et-calendrier"
-    }
+        "url": "https://epreuves.fff.fr/competition/engagement/439452-n3/phase/1/5/resultats-et-calendrier",
+    },
+
+    # R1 (2 poules)
+    {
+        "level": "R1",
+        "competition": "Seniors Régional 1 - Poule A (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439189-seniors-regional-1/phase/1/1",
+    },
+    {
+        "level": "R1",
+        "competition": "Seniors Régional 1 - Poule B (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439189-seniors-regional-1/phase/1/2",
+    },
+
+    # R2 (4 poules)
+    {
+        "level": "R2",
+        "competition": "Seniors Régional 2 - Poule A (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/1",
+    },
+    {
+        "level": "R2",
+        "competition": "Seniors Régional 2 - Poule B (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/2",
+    },
+    {
+        "level": "R2",
+        "competition": "Seniors Régional 2 - Poule C (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/3",
+    },
+    {
+        "level": "R2",
+        "competition": "Seniors Régional 2 - Poule D (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/4",
+    },
+
+    # R3 (8 poules)
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule A (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/1",
+    },
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule B (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/2",
+    },
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule C (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/3",
+    },
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule D (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/4",
+    },
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule E (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/5",
+    },
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule F (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/6",
+    },
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule G (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/7",
+    },
+    {
+        "level": "R3",
+        "competition": "Seniors Régional 3 - Poule H (HDF)",
+        "url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/8",
+    },
 ]
+
 
 LOOKAHEAD_DAYS = 30
 
