@@ -93,10 +93,15 @@ def parse_match_page(url: str) -> dict | None:
 
     # 1) Date/heure : souvent en haut de page en clair (ex: "sam 07 fév 2026 - 14h00")
     dt = None
-    for line in re.findall(r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\s+\d{1,2}\s+[a-zéûôîàç\.]+\s+\d{4}\s+-\s+\d{1,2}h\d{2}\b", html, flags=re.IGNORECASE):
-        dt = parse_fr_datetime(line)
-        if dt:
-            break
+   for line in re.findall(
+    r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+\d{1,2}\s+[a-zéûôîàç\.]+\s+\d{4}\s+-\s+\d{1,2}h(?:\d{2})?\b",
+    html,
+    flags=re.IGNORECASE
+):
+    dt = parse_fr_datetime(line)
+    if dt:
+        break
+
     if not dt:
         return None
 
@@ -184,17 +189,20 @@ def main():
                 continue
             seen_match_urls.add(mu)
 
-            mp = None
-            try:
-                mp = parse_match_page(mu)
-                parsed_ok += 1
+           mp = None
+try:
+    mp = parse_match_page(mu)
+except Exception as e:
+    print(f"[WARN] parse match KO: {mu} ({e})")
+    parsed_fail += 1
+    continue
 
-            except Exception as e:
-                print(f"[WARN] parse match KO: {mu} ({e})")
+if not mp:
+    parsed_fail += 1
+    continue
 
-            if not mp:
-                parsed_fail += 1
-                continue
+parsed_ok += 1
+
 
             dt = mp["starts_at"]
             if not (window_start <= dt <= window_end):
