@@ -1,0 +1,15 @@
+{
+  "updated_at": "2026-02-09T00:00:00+01:00",
+  "items": [
+    {
+      "sport": "football",
+      "level": "R1",
+      "starts_at": "2026-02-14T18:00:00+01:00",
+      "competition": "R1 Seniors HDF",
+      "home_team": "US Demo Saint-Quentin",
+      "away_team": "AS Demo Lille",
+      "venue": { "name": "Stade Demo Saint-Quentin", "city": "Saint-Quentin", "lat": 49.8489, "lon": 3.2876 },
+      "source_url": "https://example.com"
+    }
+  ]
+}
