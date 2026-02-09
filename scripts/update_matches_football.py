@@ -1,5 +1,4 @@
 import json
-import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,223 +11,267 @@ UTC = ZoneInfo("UTC")
 
 OUT = Path("matches.json")
 
-WINDOW_DAYS = 14
+# IMPORTANT :
+# - cp_no = l'identifiant numérique dans l'URL "competition/engagement/<ID>-..."
+# - phase = souvent 1
+COMPETITIONS = [
+    {"level": "N2", "competition": "National 2 - Poule B", "cp_no": 439451, "phase": 1},
+    {"level": "N3", "competition": "National 3 - Poule E", "cp_no": 439452, "phase": 1},
 
-# ✅ LIMITES (pour que ça reste rapide)
-MAX_TEAM_PAGES_PER_COMP = 12          # avant: 40
-MAX_MATCH_LINKS_PER_TEAM = 8          # avant: 30
-MAX_MATCH_PAGES_TOTAL = 220           # coupe globale (toutes compétitions confondues)
-TARGET_ITEMS = 80                     # dès qu'on a 80 matchs dans la fenêtre, on stoppe
+    {"level": "R1", "competition": "R1 - Poule A", "cp_no": 439189, "phase": 1},
+    {"level": "R1", "competition": "R1 - Poule B", "cp_no": 439189, "phase": 1},
+
+    {"level": "R2", "competition": "R2 - Poule A", "cp_no": 439190, "phase": 1},
+    {"level": "R2", "competition": "R2 - Poule B", "cp_no": 439190, "phase": 1},
+    {"level": "R2", "competition": "R2 - Poule C", "cp_no": 439190, "phase": 1},
+    {"level": "R2", "competition": "R2 - Poule D", "cp_no": 439190, "phase": 1},
+
+    {"level": "R3", "competition": "R3 - Poule A", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule B", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule C", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule D", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule E", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule F", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule G", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule H", "cp_no": 439191, "phase": 1},
+]
+
+# L'API a déjà changé de domaine par le passé : on tente plusieurs bases.
+BASE_URLS = [
+    "https://api-dofa.prd-aws.fff.fr",
+    "https://api-dofa.fff.fr",
+]
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "match-radar-hdf (github actions)",
-    "Accept-Language": "fr-FR,fr;q=0.9",
+    "User-Agent": "match-radar-hdf (github actions) - contact: example@example.com",
+    "Accept": "application/json,text/plain,*/*",
 })
-
-COMPETITIONS = [
-    {"level": "N2", "competition": "National 2 - Poule B", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439451-n2/phase/1/2/resultats-et-calendrier"},
-    {"level": "N3", "competition": "National 3 - Poule E", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439452-n3/phase/1/5/resultats-et-calendrier"},
-    {"level": "R1", "competition": "R1 - Poule A", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439189-seniors-regional-1/phase/1/1"},
-    {"level": "R1", "competition": "R1 - Poule B", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439189-seniors-regional-1/phase/1/2"},
-    {"level": "R2", "competition": "R2 - Poule A", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/1"},
-    {"level": "R2", "competition": "R2 - Poule B", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/2"},
-    {"level": "R2", "competition": "R2 - Poule C", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/3"},
-    {"level": "R2", "competition": "R2 - Poule D", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/4"},
-    {"level": "R3", "competition": "R3 - Poule A", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/1"},
-    {"level": "R3", "competition": "R3 - Poule B", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/2"},
-    {"level": "R3", "competition": "R3 - Poule C", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/3"},
-    {"level": "R3", "competition": "R3 - Poule D", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/4"},
-    {"level": "R3", "competition": "R3 - Poule E", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/5"},
-    {"level": "R3", "competition": "R3 - Poule F", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/6"},
-    {"level": "R3", "competition": "R3 - Poule G", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/7"},
-    {"level": "R3", "competition": "R3 - Poule H", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/8"},
-]
-
-# pages équipe / match
-TEAM_URL_RE = re.compile(r"(https://epreuves\.fff\.fr)?(/competition/club/\d+[^\"'\s<]+/equipe/[^\"'\s<]+)", re.IGNORECASE)
-MATCH_URL_RE = re.compile(r"(https://epreuves\.fff\.fr)?(/competition/match/\d+[^\"'\s<]+)", re.IGNORECASE)
-
-MONTHS = {
-    "jan": 1, "janv": 1,
-    "fév": 2, "fev": 2, "févr": 2, "fevr": 2,
-    "mar": 3, "mars": 3,
-    "avr": 4,
-    "mai": 5,
-    "jun": 6, "juin": 6,
-    "jui": 7, "juil": 7,
-    "aoû": 8, "aou": 8, "août": 8,
-    "sep": 9, "sept": 9,
-    "oct": 10,
-    "nov": 11,
-    "déc": 12, "dec": 12,
-}
-
-# "sam. 14 fév 2026 - 18h" ou "18h00"
-DATE_RE = re.compile(
-    r"\b(lun|mar|mer|jeu|ven|sam|dim)\.?\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})?\b",
-    re.IGNORECASE
-)
-
-def load_json(path: Path, default):
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return default
 
 def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def fetch(url: str) -> str:
-    r = SESSION.get(url, timeout=25)
+def iso_to_dt(s: str) -> datetime | None:
+    # Supporte "2026-02-14T18:00:00+01:00" etc.
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=PARIS)
+        return dt.astimezone(PARIS)
+    except Exception:
+        return None
+
+def http_get_json(url: str):
+    r = SESSION.get(url, timeout=30)
     r.raise_for_status()
-    return r.text
+    return r.json()
 
-def strip_tags(html: str) -> str:
-    html = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
-    html = re.sub(r"(?is)<style.*?>.*?</style>", " ", html)
-    return re.sub(r"(?s)<[^>]+>", " ", html)
+def first_working_base() -> str:
+    # Ping léger : on tente un endpoint simple (clubs page 1) avec filter vide
+    for base in BASE_URLS:
+        try:
+            _ = http_get_json(f"{base}/api/clubs.json?page=1&filter=")
+            return base
+        except Exception:
+            continue
+    raise RuntimeError("Impossible d'atteindre l'API DOFA (aucune base ne répond).")
 
-def parse_any_dt_from_text(text: str) -> datetime | None:
-    text = re.sub(r"\s+", " ", text.strip().lower())
-    text = text.replace("févr.", "févr").replace("fév.", "fév").replace("janv.", "janv")
-    text = text.replace("sept.", "sept").replace("déc.", "déc").replace("août", "aoû")
+def as_list(payload):
+    # Certains endpoints renvoient une liste directe,
+    # d'autres renvoient du JSON-LD/Hydra avec 'hydra:member'
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        if "hydra:member" in payload and isinstance(payload["hydra:member"], list):
+            return payload["hydra:member"]
+        if "member" in payload and isinstance(payload["member"], list):
+            return payload["member"]
+        # fallback : parfois c'est un dict de dicts
+        for k in ("items", "data", "results"):
+            if k in payload and isinstance(payload[k], list):
+                return payload[k]
+    return []
 
-    m = DATE_RE.search(text)
-    if not m:
-        return None
-    day = int(m.group(2))
-    mon_txt = m.group(3).strip(".")
-    year = int(m.group(4))
-    hh = int(m.group(5))
-    mm = int(m.group(6)) if m.group(6) else 0
-    mon = MONTHS.get(mon_txt)
-    if not mon:
-        return None
-    return datetime(year, mon, day, hh, mm, tzinfo=PARIS)
+def get_poules(base: str, cp_no: int, phase: int) -> list[dict]:
+    # Souvent requis : .json?filter=
+    url = f"{base}/api/compets/{cp_no}/phases/{phase}/poules.json?filter="
+    payload = http_get_json(url)
+    return as_list(payload)
 
-def extract_team_pages(html: str) -> list[str]:
-    links = set()
-    for m in TEAM_URL_RE.finditer(html):
-        links.add("https://epreuves.fff.fr" + m.group(2))
-    return sorted(links)
+def get_match_entities_for_poule(base: str, po_no: int, max_pages: int = 6) -> list[dict]:
+    """
+    On pagine pour éviter les runs à 24 minutes.
+    max_pages=6 -> assez pour récupérer la fenêtre proche si le tri est standard.
+    """
+    all_items = []
+    for page in range(1, max_pages + 1):
+        tried = []
 
-def extract_match_links(html: str) -> list[str]:
-    links = set()
-    for m in MATCH_URL_RE.finditer(html):
-        links.add("https://epreuves.fff.fr" + m.group(2))
-    return sorted(links)
+        # Plusieurs variantes existent selon les périodes :
+        candidates = [
+            f"{base}/api/poules/{po_no}/match_entities.json?page={page}&filter=",
+            f"{base}/api/poules/{po_no}/match_entities.json?filter=&page={page}",
+            f"{base}/api/poules/{po_no}/match_entities?page={page}&filter=",
+        ]
 
-def parse_match_page(url: str) -> dict | None:
-    html = fetch(url)
-    text = strip_tags(html)
-    dt = parse_any_dt_from_text(text)
-    if not dt:
-        return None
+        payload = None
+        for u in candidates:
+            tried.append(u)
+            try:
+                payload = http_get_json(u)
+                break
+            except Exception:
+                payload = None
 
-    title = re.search(r"<title>\s*Le match\s*\|\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
-    if not title:
-        return None
-    t = title.group(1).strip()
-    if " - " not in t:
-        return None
-    home, away = [x.strip() for x in t.split(" - ", 1)]
+        if payload is None:
+            # Rien sur cette poule (ou endpoint non dispo)
+            return all_items
 
-    return {"starts_at": dt, "home_team": home, "away_team": away, "source_url": url}
+        items = as_list(payload)
+        if not items:
+            break
+
+        all_items.extend(items)
+
+        # petit frein pour être gentil avec l'API
+        time.sleep(0.05)
+
+    return all_items
+
+def extract_teams(me: dict) -> tuple[str, str]:
+    """
+    Selon les retours, ça peut être :
+    - home_team / away_team
+    - team_home / team_away
+    - home / away avec 'name'
+    """
+    def name_of(x):
+        if isinstance(x, str):
+            return x
+        if isinstance(x, dict):
+            for k in ("name", "short_name", "label"):
+                if k in x and isinstance(x[k], str):
+                    return x[k]
+        return ""
+
+    home = ""
+    away = ""
+    for hk, ak in [
+        ("home_team", "away_team"),
+        ("team_home", "team_away"),
+        ("home", "away"),
+        ("club_home", "club_away"),
+    ]:
+        if hk in me or ak in me:
+            home = name_of(me.get(hk, ""))
+            away = name_of(me.get(ak, ""))
+            if home or away:
+                break
+
+    return home.strip() or "Domicile", away.strip() or "Extérieur"
+
+def extract_start_dt(me: dict) -> datetime | None:
+    # Clés courantes possibles
+    for k in ("starts_at", "date", "datetime", "match_date", "begin_at"):
+        v = me.get(k)
+        if isinstance(v, str):
+            dt = iso_to_dt(v)
+            if dt:
+                return dt
+    return None
+
+def extract_venue(me: dict) -> tuple[str, str]:
+    """
+    On prend ce qu'on peut : parfois 'stadium', 'venue', 'lieu'
+    """
+    venue_name = ""
+    city = ""
+
+    for k in ("stadium", "venue", "lieu", "place"):
+        v = me.get(k)
+        if isinstance(v, dict):
+            venue_name = v.get("name") or v.get("label") or venue_name
+            city = v.get("city") or v.get("town") or city
+
+    # parfois c’est directement dans des clés "stadium_name" etc.
+    venue_name = me.get("stadium_name") or me.get("venue_name") or venue_name
+    city = me.get("city") or me.get("town") or city
+
+    return (venue_name or "Stade (à compléter)"), (city or "")
 
 def main():
     now = datetime.now(PARIS)
     window_start = now
-    window_end = now + timedelta(days=WINDOW_DAYS)
+    window_end = now + timedelta(days=14)
 
-    print(f"[INFO] Fenêtre: {window_start.isoformat()} -> {window_end.isoformat()}")
+    print(f"[INFO] Fenêtre: {window_start.isoformat()}  ->  {window_end.isoformat()}")
+
+    base = first_working_base()
+    print(f"[INFO] API base utilisée: {base}")
 
     items = []
-    seen_match_urls = set()
-    match_pages_opened = 0
-
-    parsed_ok = 0
-    parsed_fail = 0
+    pages_opened = 0
 
     for comp in COMPETITIONS:
-        if len(items) >= TARGET_ITEMS:
-            break
+        cp_no = comp["cp_no"]
+        phase = comp["phase"]
 
+        # 1) récupérer les poules
         try:
-            comp_html = fetch(comp["calendar_url"])
+            poules = get_poules(base, cp_no, phase)
         except Exception as e:
-            print(f"[WARN] fetch comp KO: {comp['calendar_url']} ({e})")
+            print(f"[WARN] Poules KO cp_no={cp_no} ({e})")
             continue
 
-        team_pages = extract_team_pages(comp_html)[:MAX_TEAM_PAGES_PER_COMP]
-        print(f"[INFO] {comp['level']} {comp['competition']} | team_pages={len(team_pages)}")
+        print(f"[INFO] {comp['level']} {comp['competition']} | poules trouvées: {len(poules)}")
 
-        for tp in team_pages:
-            if len(items) >= TARGET_ITEMS or match_pages_opened >= MAX_MATCH_PAGES_TOTAL:
-                break
-
-            try:
-                thtml = fetch(tp)
-            except Exception:
+        # 2) pour chaque poule, récupérer les match_entities (paginés)
+        for p in poules:
+            po_no = p.get("po_no") or p.get("id") or p.get("number")
+            if not po_no:
                 continue
 
-            # ✅ filtre rapide : si on ne voit aucune date future proche dans la page équipe, on saute
-            ttext = strip_tags(thtml)
-            dt_hint = parse_any_dt_from_text(ttext)
-            if dt_hint and dt_hint > window_end:
-                continue
+            mes = get_match_entities_for_poule(base, int(po_no), max_pages=6)
+            pages_opened += 1
 
-            match_urls = extract_match_links(thtml)[:MAX_MATCH_LINKS_PER_TEAM]
-
-            for mu in match_urls:
-                if len(items) >= TARGET_ITEMS or match_pages_opened >= MAX_MATCH_PAGES_TOTAL:
-                    break
-                if mu in seen_match_urls:
+            for me in mes:
+                dt = extract_start_dt(me)
+                if not dt:
                     continue
-                seen_match_urls.add(mu)
-
-                match_pages_opened += 1
-                try:
-                    mp = parse_match_page(mu)
-                except Exception:
-                    parsed_fail += 1
-                    continue
-
-                if not mp:
-                    parsed_fail += 1
-                    continue
-
-                parsed_ok += 1
-                dt = mp["starts_at"]
                 if not (window_start <= dt <= window_end):
                     continue
+
+                home, away = extract_teams(me)
+                venue_name, city = extract_venue(me)
 
                 items.append({
                     "sport": "football",
                     "level": comp["level"],
                     "starts_at": dt.isoformat(),
                     "competition": comp["competition"],
-                    "home_team": mp["home_team"],
-                    "away_team": mp["away_team"],
-                    "venue": {"name": "Stade (à géolocaliser)", "city": "", "lat": 49.8489, "lon": 3.2876},
-                    "source_url": mp["source_url"]
+                    "home_team": home,
+                    "away_team": away,
+                    "venue": {
+                        "name": venue_name,
+                        "city": city,
+                        # provisoire tant qu'on ne géocode pas encore
+                        "lat": 49.8489,
+                        "lon": 3.2876,
+                    },
+                    # on met un lien "source" générique si on n'a pas mieux
+                    "source_url": f"https://epreuves.fff.fr/",
                 })
 
-                time.sleep(0.05)
+    items.sort(key=lambda x: x["starts_at"])
+    print(f"[INFO] pages match ouvertes={pages_opened}")
+    print(f"[OK] items={len(items)} (dans la fenêtre)")
 
-    # dédup + tri
-    uniq = {}
-    for it in items:
-        uniq[(it["starts_at"], it["home_team"], it["away_team"])] = it
-    items = sorted(uniq.values(), key=lambda x: x["starts_at"])
-
-    out = load_json(OUT, {"updated_at": None, "items": []})
-    out["updated_at"] = datetime.now(UTC).isoformat()
-    out["items"] = items
+    out = {
+        "updated_at": datetime.now(UTC).isoformat(),
+        "items": items
+    }
     save_json(OUT, out)
-
-    print(f"[INFO] pages match ouvertes={match_pages_opened}")
-    print(f"[INFO] parse_match_page ok={parsed_ok} fail={parsed_fail}")
-    print(f"[OK] items={len(items)}")
+    print("[OK] matches.json écrit")
 
 if __name__ == "__main__":
     main()
