@@ -3,6 +3,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 import requests
@@ -37,7 +38,6 @@ SESSION.headers.update({
     "Accept-Language": "fr-FR,fr;q=0.9",
 })
 
-# ✅ IMPORTANT : la FFF utilise souvent "fév" (pas "févr")
 MONTHS = {
     "jan": 1, "janv": 1,
     "fév": 2, "fev": 2, "févr": 2, "fevr": 2,
@@ -53,16 +53,19 @@ MONTHS = {
     "déc": 12, "dec": 12,
 }
 
-# accepte "sam" ou "sam." + minutes optionnelles "18h" ou "18h00"
 DATE_RE = re.compile(
     r"^(lun|mar|mer|jeu|ven|sam|dim)\.?\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})?$",
     re.IGNORECASE
 )
 
+# liens des matchs
 MATCH_URL_RE = re.compile(
     r"(https://epreuves\.fff\.fr)?(/competition/match/\d+[^\"'\s<]+)",
     re.IGNORECASE
 )
+
+# lien "navigation suivante"
+NEXT_RE = re.compile(r'href="([^"]+)"[^>]*>\s*navigation suivante', re.IGNORECASE)
 
 def load_json(path: Path, default):
     if path.exists():
@@ -81,6 +84,7 @@ def parse_fr_datetime(s: str) -> datetime | None:
     s = re.sub(r"\s+", " ", s.strip().lower())
     s = s.replace("févr.", "févr").replace("fév.", "fév").replace("janv.", "janv")
     s = s.replace("sept.", "sept").replace("déc.", "déc").replace("août", "aoû")
+
     m = DATE_RE.match(s)
     if not m:
         return None
@@ -104,9 +108,16 @@ def extract_match_links(html: str) -> list[str]:
         links.add("https://epreuves.fff.fr" + m.group(2))
     return sorted(links)
 
+def find_next_page(html: str, current_url: str) -> str | None:
+    m = NEXT_RE.search(html)
+    if not m:
+        return None
+    return urljoin(current_url, m.group(1))
+
 def parse_match_page(url: str) -> dict | None:
     html = fetch(url)
 
+    # date/heure en clair sur la page
     dt = None
     for line in re.findall(
         r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+\d{1,2}\s+[a-zéûôîàç\.]+\s+\d{4}\s+-\s+\d{1,2}h(?:\d{2})?\b",
@@ -119,6 +130,7 @@ def parse_match_page(url: str) -> dict | None:
     if not dt:
         return None
 
+    # équipes via title
     title = re.search(r"<title>\s*Le match\s*\|\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
     if not title:
         return None
@@ -127,89 +139,84 @@ def parse_match_page(url: str) -> dict | None:
         return None
     home, away = [x.strip() for x in t.split(" - ", 1)]
 
-    return {
-        "starts_at": dt,
-        "home_team": home,
-        "away_team": away,
-        "source_url": url,
-    }
-
-def extra_pages(calendar_url: str) -> list[str]:
-    urls = [calendar_url]
-    if calendar_url.endswith("/resultats-et-calendrier"):
-        urls.append(calendar_url.replace("/resultats-et-calendrier", ""))
-    else:
-        urls.append(calendar_url.rstrip("/") + "/resultats-et-calendrier")
-    out = []
-    for u in urls:
-        if u not in out:
-            out.append(u)
-    return out
+    return {"starts_at": dt, "home_team": home, "away_team": away, "source_url": url}
 
 def main():
     now = datetime.now(PARIS)
     window_start = now
     window_end = now + timedelta(days=14)
-
-    print(f"[INFO] Fenêtre: {window_start.isoformat()}  ->  {window_end.isoformat()}")
+    print(f"[INFO] Fenêtre: {window_start.isoformat()} -> {window_end.isoformat()}")
 
     items = []
     seen_match_urls = set()
+
     parsed_ok = 0
     parsed_fail = 0
+    kept_in_window = 0
 
+    # Pour chaque compétition : on avance page par page jusqu'à dépasser J+14
     for comp in COMPETITIONS:
-        comp_match_urls = set()
+        page_url = comp["calendar_url"]
+        max_pages = 8  # ~8 semaines, largement suffisant pour trouver J+14
 
-        for page_url in extra_pages(comp["calendar_url"]):
+        for page_i in range(max_pages):
             try:
                 html = fetch(page_url)
             except Exception as e:
                 print(f"[WARN] Fetch impossible: {page_url} ({e})")
-                continue
+                break
 
-            found = extract_match_links(html)
-            print(f"[INFO] {comp['level']} {comp['competition']} | {page_url} | liens match trouvés: {len(found)}")
-            comp_match_urls.update(found)
+            match_urls = extract_match_links(html)
+            print(f"[INFO] {comp['level']} {comp['competition']} | page {page_i+1}/{max_pages} | matchs trouvés: {len(match_urls)}")
 
-        comp_match_urls = sorted(comp_match_urls)
-        if not comp_match_urls:
-            continue
+            # on parse les matchs de la page
+            max_per_page = 60
+            latest_dt_on_page = None
 
-        for mu in comp_match_urls[:180]:
-            if mu in seen_match_urls:
-                continue
-            seen_match_urls.add(mu)
+            for mu in match_urls[:max_per_page]:
+                if mu in seen_match_urls:
+                    continue
+                seen_match_urls.add(mu)
 
-            try:
-                mp = parse_match_page(mu)
-            except Exception as e:
-                print(f"[WARN] parse match KO: {mu} ({e})")
-                parsed_fail += 1
-                continue
+                try:
+                    mp = parse_match_page(mu)
+                except Exception as e:
+                    parsed_fail += 1
+                    continue
 
-            if not mp:
-                parsed_fail += 1
-                continue
+                if not mp:
+                    parsed_fail += 1
+                    continue
 
-            parsed_ok += 1
+                parsed_ok += 1
+                dt = mp["starts_at"]
+                if latest_dt_on_page is None or dt > latest_dt_on_page:
+                    latest_dt_on_page = dt
 
-            dt = mp["starts_at"]
-            if not (window_start <= dt <= window_end):
-                continue
+                if window_start <= dt <= window_end:
+                    kept_in_window += 1
+                    items.append({
+                        "sport": "football",
+                        "level": comp["level"],
+                        "starts_at": dt.isoformat(),
+                        "competition": comp["competition"],
+                        "home_team": mp["home_team"],
+                        "away_team": mp["away_team"],
+                        "venue": {"name": "Stade (à géolocaliser)", "city": "", "lat": 49.8489, "lon": 3.2876},
+                        "source_url": mp["source_url"]
+                    })
 
-            items.append({
-                "sport": "football",
-                "level": comp["level"],
-                "starts_at": dt.isoformat(),
-                "competition": comp["competition"],
-                "home_team": mp["home_team"],
-                "away_team": mp["away_team"],
-                "venue": {"name": "Stade (à géolocaliser)", "city": "", "lat": 49.8489, "lon": 3.2876},
-                "source_url": mp["source_url"]
-            })
+                time.sleep(0.08)
 
-            time.sleep(0.12)
+            # Si on a déjà une date sur la page et qu'elle dépasse la fenêtre, inutile d'aller plus loin
+            if latest_dt_on_page and latest_dt_on_page > window_end:
+                break
+
+            nxt = find_next_page(html, page_url)
+            if not nxt or nxt == page_url:
+                break
+            page_url = nxt
+            time.sleep(0.2)
 
     items.sort(key=lambda x: x["starts_at"])
 
@@ -219,7 +226,7 @@ def main():
     save_json(OUT, out)
 
     print(f"[INFO] parse_match_page ok={parsed_ok} fail={parsed_fail}")
-    print(f"[OK] items={len(items)} (écrits dans matches.json)")
+    print(f"[OK] items={len(items)} (dans la fenêtre)")
 
 if __name__ == "__main__":
     main()
