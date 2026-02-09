@@ -37,9 +37,20 @@ SESSION.headers.update({
     "Accept-Language": "fr-FR,fr;q=0.9",
 })
 
+# ✅ IMPORTANT : la FFF utilise souvent "fév" (pas "févr")
 MONTHS = {
-    "janv": 1, "févr": 2, "fevr": 2, "mars": 3, "avr": 4, "mai": 5, "juin": 6,
-    "juil": 7, "aoû": 8, "aou": 8, "sept": 9, "oct": 10, "nov": 11, "déc": 12, "dec": 12
+    "jan": 1, "janv": 1,
+    "fév": 2, "fev": 2, "févr": 2, "fevr": 2,
+    "mar": 3, "mars": 3,
+    "avr": 4,
+    "mai": 5,
+    "jun": 6, "juin": 6,
+    "jui": 7, "juil": 7,
+    "aoû": 8, "aou": 8, "août": 8,
+    "sep": 9, "sept": 9,
+    "oct": 10,
+    "nov": 11,
+    "déc": 12, "dec": 12,
 }
 
 # accepte "sam" ou "sam." + minutes optionnelles "18h" ou "18h00"
@@ -48,7 +59,6 @@ DATE_RE = re.compile(
     re.IGNORECASE
 )
 
-# On attrape les URLs de match même si ce n’est pas un href classique
 MATCH_URL_RE = re.compile(
     r"(https://epreuves\.fff\.fr)?(/competition/match/\d+[^\"'\s<]+)",
     re.IGNORECASE
@@ -69,8 +79,8 @@ def fetch(url: str) -> str:
 
 def parse_fr_datetime(s: str) -> datetime | None:
     s = re.sub(r"\s+", " ", s.strip().lower())
-    s = s.replace("févr.", "févr").replace("janv.", "janv").replace("sept.", "sept").replace("déc.", "déc")
-    s = s.replace("août", "aoû")
+    s = s.replace("févr.", "févr").replace("fév.", "fév").replace("janv.", "janv")
+    s = s.replace("sept.", "sept").replace("déc.", "déc").replace("août", "aoû")
     m = DATE_RE.match(s)
     if not m:
         return None
@@ -91,14 +101,12 @@ def parse_fr_datetime(s: str) -> datetime | None:
 def extract_match_links(html: str) -> list[str]:
     links = set()
     for m in MATCH_URL_RE.finditer(html):
-        path = m.group(2)
-        links.add("https://epreuves.fff.fr" + path)
+        links.add("https://epreuves.fff.fr" + m.group(2))
     return sorted(links)
 
 def parse_match_page(url: str) -> dict | None:
     html = fetch(url)
 
-    # date/heure dans la page (souple : "sam." + "18h" possible)
     dt = None
     for line in re.findall(
         r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+\d{1,2}\s+[a-zéûôîàç\.]+\s+\d{4}\s+-\s+\d{1,2}h(?:\d{2})?\b",
@@ -108,40 +116,21 @@ def parse_match_page(url: str) -> dict | None:
         dt = parse_fr_datetime(line)
         if dt:
             break
-
     if not dt:
         return None
 
-    # équipes depuis le <title> : "Le match | HOME - AWAY"
     title = re.search(r"<title>\s*Le match\s*\|\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
     if not title:
         return None
-
     t = title.group(1)
     if " - " not in t:
         return None
-
     home, away = [x.strip() for x in t.split(" - ", 1)]
-
-    # stade + ville (optionnel, on ne bloque pas si absent)
-    venue_name = ""
-    venue_city = ""
-
-    m_venue = re.search(
-        r"Lieu de la rencontre[\s\S]{0,2500}?\b([A-Z0-9 \-’'ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ]{5,})\b[\s\S]{0,2500}?\b\d{5}\b[\s\-]*([A-ZÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ \-’']+)\b",
-        html,
-        re.IGNORECASE
-    )
-    if m_venue:
-        venue_name = m_venue.group(1).strip()
-        venue_city = m_venue.group(2).strip().title()
 
     return {
         "starts_at": dt,
         "home_team": home,
         "away_team": away,
-        "venue_name": venue_name,
-        "venue_city": venue_city,
         "source_url": url,
     }
 
@@ -151,7 +140,6 @@ def extra_pages(calendar_url: str) -> list[str]:
         urls.append(calendar_url.replace("/resultats-et-calendrier", ""))
     else:
         urls.append(calendar_url.rstrip("/") + "/resultats-et-calendrier")
-
     out = []
     for u in urls:
         if u not in out:
@@ -171,10 +159,9 @@ def main():
     parsed_fail = 0
 
     for comp in COMPETITIONS:
-        urls_to_try = extra_pages(comp["calendar_url"])
         comp_match_urls = set()
 
-        for page_url in urls_to_try:
+        for page_url in extra_pages(comp["calendar_url"]):
             try:
                 html = fetch(page_url)
             except Exception as e:
@@ -183,8 +170,7 @@ def main():
 
             found = extract_match_links(html)
             print(f"[INFO] {comp['level']} {comp['competition']} | {page_url} | liens match trouvés: {len(found)}")
-            for u in found:
-                comp_match_urls.add(u)
+            comp_match_urls.update(found)
 
         comp_match_urls = sorted(comp_match_urls)
         if not comp_match_urls:
@@ -219,12 +205,7 @@ def main():
                 "competition": comp["competition"],
                 "home_team": mp["home_team"],
                 "away_team": mp["away_team"],
-                "venue": {
-                    "name": mp.get("venue_name") or "Stade (à compléter)",
-                    "city": mp.get("venue_city") or "",
-                    "lat": 49.8489,  # provisoire (Saint-Quentin)
-                    "lon": 3.2876
-                },
+                "venue": {"name": "Stade (à géolocaliser)", "city": "", "lat": 49.8489, "lon": 3.2876},
                 "source_url": mp["source_url"]
             })
 
