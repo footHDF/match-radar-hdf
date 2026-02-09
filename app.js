@@ -28,39 +28,24 @@ function fmtDate(iso) {
   });
 }
 
-// Données de démo (on remplacera plus tard par de vraies données)
-const matches = [
-  {
-    sport: "football",
-    level: "R1",
-    starts_at: "2026-02-14T18:00:00+01:00",
-    competition: "R1 Seniors HDF",
-  home_team: "Chauny FC",
-away_team: "Saint-Quentin SC",
-venue: { name: "Stade Demo Saint-Quentin", city: "Saint-Quentin", lat: 49.8489, lon: 3.2876 },
-    source_url: "https://example.com"
-  },
-  {
-    sport: "football",
-    level: "R2",
-    starts_at: "2026-02-15T15:00:00+01:00",
-    competition: "R2 Seniors HDF",
-    home_team: "FC Demo Chauny",
-    away_team: "SC Demo Amiens",
-    venue: { name: "Stade Demo Chauny", city: "Chauny", lat: 49.6137, lon: 3.2180 },
-    source_url: "https://example.com"
-  },
-  {
-    sport: "football",
-    level: "R3",
-    starts_at: "2026-02-16T15:00:00+01:00",
-    competition: "R3 Seniors HDF",
-    home_team: "ES Demo Amiens",
-    away_team: "CS Demo Lille",
-    venue: { name: "Stade Demo Amiens", city: "Amiens", lat: 49.8941, lon: 2.2957 },
-    source_url: "https://example.com"
+let matches = [];
+
+async function loadMatches() {
+  try {
+    const res = await fetch("./matches.json", { cache: "no-store" });
+    const json = await res.json();
+    matches = json.items || [];
+    if (document.getElementById("msg")) {
+      document.getElementById("msg").style.display = "block";
+      document.getElementById("msg").textContent = `Données chargées : ${matches.length} match(s)`;
+    }
+  } catch (e) {
+    showMsg("Impossible de charger matches.json (réseau/cache).");
+    matches = [];
   }
-];
+}
+
+
 
 let map, userMarker;
 let matchMarkers = [];
@@ -139,13 +124,15 @@ function render() {
   });
 }
 
-function boot() {
+async function boot() {
   $("count").textContent = "Initialisation…";
 
   const ok = initMap();
   if (!ok) return;
 
   // ✅ Affiche immédiatement avec la position par défaut (Lille)
+    await loadMatches();
+
   render();
 
   // ⏱️ Sécurité : si la géolocalisation ne répond pas, on garde Lille
@@ -185,3 +172,4 @@ function boot() {
 
 
 window.addEventListener("load", boot);
+
