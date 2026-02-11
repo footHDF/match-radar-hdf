@@ -12,28 +12,28 @@ UTC = ZoneInfo("UTC")
 OUT = Path("matches.json")
 WINDOW_DAYS = 14
 
-# IMPORTANT : gp_no = le dernier nombre de ton URL "phase/1/<gp_no>"
-# Exemple N2 : .../phase/1/2/... => gp_no = 2
+# ⚙️ limites anti-runs longs
+MAX_PAGES_PER_POULE = 4       # on ne pagine pas toute la saison
+MAX_POULES_PER_COMP = 2       # sécurité (au cas où l’API renvoie trop de poules)
+SLEEP = 0.06
+
 COMPETITIONS = [
-    {"level": "N2", "competition": "National 2 - Poule B", "cp_no": 439451, "ph_no": 1, "gp_no": 2},
-    {"level": "N3", "competition": "National 3 - Poule E", "cp_no": 439452, "ph_no": 1, "gp_no": 5},
-
-    {"level": "R1", "competition": "R1 - Poule A", "cp_no": 439189, "ph_no": 1, "gp_no": 1},
-    {"level": "R1", "competition": "R1 - Poule B", "cp_no": 439189, "ph_no": 1, "gp_no": 2},
-
-    {"level": "R2", "competition": "R2 - Poule A", "cp_no": 439190, "ph_no": 1, "gp_no": 1},
-    {"level": "R2", "competition": "R2 - Poule B", "cp_no": 439190, "ph_no": 1, "gp_no": 2},
-    {"level": "R2", "competition": "R2 - Poule C", "cp_no": 439190, "ph_no": 1, "gp_no": 3},
-    {"level": "R2", "competition": "R2 - Poule D", "cp_no": 439190, "ph_no": 1, "gp_no": 4},
-
-    {"level": "R3", "competition": "R3 - Poule A", "cp_no": 439191, "ph_no": 1, "gp_no": 1},
-    {"level": "R3", "competition": "R3 - Poule B", "cp_no": 439191, "ph_no": 1, "gp_no": 2},
-    {"level": "R3", "competition": "R3 - Poule C", "cp_no": 439191, "ph_no": 1, "gp_no": 3},
-    {"level": "R3", "competition": "R3 - Poule D", "cp_no": 439191, "ph_no": 1, "gp_no": 4},
-    {"level": "R3", "competition": "R3 - Poule E", "cp_no": 439191, "ph_no": 1, "gp_no": 5},
-    {"level": "R3", "competition": "R3 - Poule F", "cp_no": 439191, "ph_no": 1, "gp_no": 6},
-    {"level": "R3", "competition": "R3 - Poule G", "cp_no": 439191, "ph_no": 1, "gp_no": 7},
-    {"level": "R3", "competition": "R3 - Poule H", "cp_no": 439191, "ph_no": 1, "gp_no": 8},
+    {"level": "N2", "competition": "National 2 - Poule B", "cp_no": 439451, "phase": 1},
+    {"level": "N3", "competition": "National 3 - Poule E", "cp_no": 439452, "phase": 1},
+    {"level": "R1", "competition": "R1 - Poule A", "cp_no": 439189, "phase": 1},
+    {"level": "R1", "competition": "R1 - Poule B", "cp_no": 439189, "phase": 1},
+    {"level": "R2", "competition": "R2 - Poule A", "cp_no": 439190, "phase": 1},
+    {"level": "R2", "competition": "R2 - Poule B", "cp_no": 439190, "phase": 1},
+    {"level": "R2", "competition": "R2 - Poule C", "cp_no": 439190, "phase": 1},
+    {"level": "R2", "competition": "R2 - Poule D", "cp_no": 439190, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule A", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule B", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule C", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule D", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule E", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule F", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule G", "cp_no": 439191, "phase": 1},
+    {"level": "R3", "competition": "R3 - Poule H", "cp_no": 439191, "phase": 1},
 ]
 
 BASE_URLS = [
@@ -51,23 +51,7 @@ SESSION.headers.update({
 def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def http_get_json(url: str):
-    r = SESSION.get(url, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-def choose_base() -> str:
-    # Test léger. (Sans .json : c’est souvent plus fiable)
-    for base in BASE_URLS:
-        try:
-            _ = http_get_json(f"{base}/api/clubs?page=1&filter=")
-            return base
-        except Exception:
-            pass
-    raise RuntimeError("API DOFA inaccessible (aucun base URL ne répond).")
-
 def as_list(payload):
-    # Hydra JSON-LD ou liste directe
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
@@ -80,96 +64,93 @@ def as_list(payload):
                 return payload[k]
     return []
 
-def parse_dt(me: dict) -> datetime | None:
-    """
-    L’API renvoie souvent :
-    - "date": "2024-11-23T00:00:00+00:00"
-    - "time": "14H30" (ou "14H")
-    Ou parfois "starts_at".
-    """
-    # 1) starts_at direct
-    s = me.get("starts_at") or me.get("datetime")
-    if isinstance(s, str):
+def http_get_json(url: str):
+    r = SESSION.get(url, timeout=25)
+    r.raise_for_status()
+    return r.json()
+
+def get_bearer_token() -> str:
+    # Token public côté FFF (utilisé par leur site) :contentReference[oaicite:1]{index=1}
+    r = requests.get("https://www.fff.fr/api/dofa/token", timeout=25)
+    r.raise_for_status()
+    data = r.json()
+    token = data.get("token") or data.get("access_token") or data.get("jwt")
+    if not token:
+        raise RuntimeError("Token FFF introuvable dans la réponse https://www.fff.fr/api/dofa/token")
+    return token
+
+def choose_base_with_token() -> str:
+    # Endpoint “clairement connu” d’après la communauté : /api/clubs.json?page=1&filter= :contentReference[oaicite:2]{index=2}
+    for base in BASE_URLS:
         try:
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            return dt.astimezone(PARIS)
+            _ = http_get_json(f"{base}/api/clubs.json?page=1&filter=")
+            return base
         except Exception:
-            pass
+            continue
+    raise RuntimeError("API DOFA inaccessible même avec token (aucun base URL ne répond).")
 
-    # 2) date + time
-    d = me.get("date")
-    t = me.get("time")
-    if isinstance(d, str):
-        try:
-            base_dt = datetime.fromisoformat(d)
-            if base_dt.tzinfo is None:
-                base_dt = base_dt.replace(tzinfo=UTC)
-            base_dt = base_dt.astimezone(PARIS)
-        except Exception:
-            return None
+def iso_to_dt(s: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(PARIS)
+    except Exception:
+        return None
 
-        hh, mm = 0, 0
-        if isinstance(t, str):
-            tt = t.strip().upper().replace("H", ":")
-            if ":" in tt:
-                parts = tt.split(":")
-                try:
-                    hh = int(parts[0])
-                    mm = int(parts[1]) if parts[1] else 0
-                except Exception:
-                    hh, mm = 0, 0
-            else:
-                try:
-                    hh = int(tt)
-                except Exception:
-                    hh = 0
-
-        return base_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
-
+def extract_start_dt(me: dict) -> datetime | None:
+    for k in ("starts_at", "date", "datetime", "match_date", "begin_at"):
+        v = me.get(k)
+        if isinstance(v, str):
+            dt = iso_to_dt(v)
+            if dt:
+                return dt
     return None
 
-def parse_teams(me: dict) -> tuple[str, str]:
-    home = ""
-    away = ""
+def extract_teams(me: dict) -> tuple[str, str]:
+    def name_of(x):
+        if isinstance(x, str):
+            return x
+        if isinstance(x, dict):
+            for k in ("name", "short_name", "label"):
+                if k in x and isinstance(x[k], str):
+                    return x[k]
+        return ""
+    home, away = "", ""
+    for hk, ak in [("home_team","away_team"), ("team_home","team_away"), ("home","away"), ("club_home","club_away")]:
+        if hk in me or ak in me:
+            home = name_of(me.get(hk, ""))
+            away = name_of(me.get(ak, ""))
+            if home or away:
+                break
+    return home.strip() or "Domicile", away.strip() or "Extérieur"
 
-    h = me.get("home")
-    a = me.get("away")
+def extract_venue(me: dict) -> tuple[str, str]:
+    venue_name, city = "", ""
+    for k in ("stadium", "venue", "lieu", "place", "terrain"):
+        v = me.get(k)
+        if isinstance(v, dict):
+            venue_name = v.get("name") or v.get("label") or venue_name
+            city = v.get("city") or v.get("town") or city
+    venue_name = me.get("stadium_name") or me.get("venue_name") or venue_name
+    city = me.get("city") or me.get("town") or city
+    return (venue_name or "Stade (à compléter)"), (city or "")
 
-    # Dans l'exemple API : home/away contiennent "short_name"
-    if isinstance(h, dict):
-        home = h.get("short_name") or h.get("short_name_ligue") or h.get("short_name_federation") or ""
-    if isinstance(a, dict):
-        away = a.get("short_name") or a.get("short_name_ligue") or a.get("short_name_federation") or ""
+def get_poules(base: str, cp_no: int, phase: int) -> list[dict]:
+    url = f"{base}/api/compets/{cp_no}/phases/{phase}/poules.json?filter="
+    return as_list(http_get_json(url))
 
-    return home or "Domicile", away or "Extérieur"
-
-def parse_terrain(me: dict) -> dict:
-    t = me.get("terrain") if isinstance(me.get("terrain"), dict) else {}
-    return {
-        "name": t.get("name") or "Stade (à compléter)",
-        "city": t.get("city") or "",
-        "address": t.get("address") or "",
-        "zip_code": t.get("zip_code") or ""
-    }
-
-def fetch_calendrier(base: str, cp_no: int, ph_no: int, gp_no: int):
-    # Plusieurs variantes selon les versions
-    candidates = [
-        f"{base}/api/compets/{cp_no}/phases/{ph_no}/poules/{gp_no}/calendrier",
-        f"{base}/api/compets/{cp_no}/phases/{ph_no}/poules/{gp_no}/matchs",
-        f"{base}/api/compets/{cp_no}/phases/{ph_no}/poules/{gp_no}/calendrier.json?filter=",
-        f"{base}/api/compets/{cp_no}/phases/{ph_no}/poules/{gp_no}/matchs.json?filter=",
-    ]
-    last_err = None
-    for url in candidates:
-        try:
-            return as_list(http_get_json(url))
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"Calendrier introuvable cp={cp_no} ph={ph_no} gp={gp_no} ({last_err})")
+def get_match_entities_for_poule(base: str, po_no: int, max_pages: int) -> list[dict]:
+    all_items = []
+    for page in range(1, max_pages + 1):
+        url = f"{base}/api/poules/{po_no}/match_entities.json?page={page}&filter="
+        payload = http_get_json(url)
+        items = as_list(payload)
+        if not items:
+            break
+        all_items.extend(items)
+        time.sleep(SLEEP)
+    return all_items
 
 def main():
     now = datetime.now(PARIS)
@@ -177,63 +158,82 @@ def main():
     window_end = now + timedelta(days=WINDOW_DAYS)
     print(f"[INFO] Fenêtre: {window_start.isoformat()} -> {window_end.isoformat()}")
 
-    base = choose_base()
-    print(f"[INFO] API base: {base}")
+    # 1) Token
+    token = get_bearer_token()
+    SESSION.headers["Authorization"] = f"Bearer {token}"
+    print("[INFO] Token OK")
+
+    # 2) Base API OK ?
+    base = choose_base_with_token()
+    print(f"[INFO] API base utilisée: {base}")
 
     items = []
+    poules_total = 0
+    mes_total = 0
 
     for comp in COMPETITIONS:
-        cp_no, ph_no, gp_no = comp["cp_no"], comp["ph_no"], comp["gp_no"]
-
         try:
-            mes = fetch_calendrier(base, cp_no, ph_no, gp_no)
+            poules = get_poules(base, comp["cp_no"], comp["phase"])
         except Exception as e:
-            print(f"[WARN] KO {comp['level']} {comp['competition']} (cp={cp_no} gp={gp_no}) => {e}")
+            print(f"[WARN] Poules KO {comp['level']} {comp['competition']} ({e})")
             continue
 
-        kept = 0
-        for me in mes:
-            dt = parse_dt(me)
-            if not dt:
+        poules = poules[:MAX_POULES_PER_COMP]  # garde-fou
+        poules_total += len(poules)
+        print(f"[INFO] {comp['level']} {comp['competition']} | poules={len(poules)}")
+
+        for p in poules:
+            po_no = p.get("po_no") or p.get("id") or p.get("number")
+            if not po_no:
                 continue
-            if not (window_start <= dt <= window_end):
+
+            try:
+                mes = get_match_entities_for_poule(base, int(po_no), MAX_PAGES_PER_POULE)
+            except Exception:
                 continue
 
-            home, away = parse_teams(me)
-            terrain = parse_terrain(me)
+            mes_total += len(mes)
 
-            items.append({
-                "sport": "football",
-                "level": comp["level"],
-                "starts_at": dt.isoformat(),
-                "competition": comp["competition"],
-                "home_team": home,
-                "away_team": away,
-                "venue": {
-                    "name": terrain["name"],
-                    "city": terrain["city"],
-                    "lat": 49.8489,  # provisoire (géocodage plus tard)
-                    "lon": 3.2876,
-                    "address": terrain["address"],
-                    "zip_code": terrain["zip_code"],
-                },
-                "source_url": "https://epreuves.fff.fr/"
-            })
-            kept += 1
+            for me in mes:
+                dt = extract_start_dt(me)
+                if not dt:
+                    continue
+                if not (window_start <= dt <= window_end):
+                    continue
 
-        print(f"[INFO] {comp['level']} {comp['competition']} => gardés dans fenêtre: {kept}")
-        time.sleep(0.05)
+                home, away = extract_teams(me)
+                venue_name, city = extract_venue(me)
+
+                items.append({
+                    "sport": "football",
+                    "level": comp["level"],
+                    "starts_at": dt.isoformat(),
+                    "competition": comp["competition"],
+                    "home_team": home,
+                    "away_team": away,
+                    "venue": {
+                        "name": venue_name,
+                        "city": city,
+                        # provisoire (on géocodera plus tard)
+                        "lat": 49.8489,
+                        "lon": 3.2876
+                    },
+                    "source_url": "https://epreuves.fff.fr/"
+                })
 
     # dédup + tri
     uniq = {}
     for it in items:
-        uniq[(it["starts_at"], it["home_team"], it["away_team"])] = it
+        uniq[(it["starts_at"], it["home_team"], it["away_team"], it["level"])] = it
     items = sorted(uniq.values(), key=lambda x: x["starts_at"])
 
     out = {"updated_at": datetime.now(UTC).isoformat(), "items": items}
     save_json(OUT, out)
 
-    print(f"[OK] items={len(items)}")
+    print(f"[INFO] poules_total={poules_total} match_entities_lus={mes_total}")
+    print(f"[OK] items={len(items)} (dans la fenêtre)")
+    print("[OK] matches.json écrit")
 
 if __name__ == "__main__":
     main()
+
