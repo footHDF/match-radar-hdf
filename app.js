@@ -51,8 +51,6 @@ async function loadMatchesForMonth(ymStr) {
 }
 
 
-
-
 let map, userMarker;
 let matchMarkers = [];
 let userPos = { lat: 49.8489, lon: 3.2876 }; // Saint-Quentin par défaut
@@ -91,8 +89,19 @@ function render() {
 
   clearMatchMarkers();
 
+    const { start: wStart, end: wEnd } = getSelectedWeekendWindow();
+
   const filtered = matches
-    .filter(m => (level === "ALL" ? true : m.level === level))
+    .filter(m => {
+      // niveau
+      if (level !== "ALL" && m.level !== level) return false;
+
+      // week-end (samedi/dimanche)
+      const dt = new Date(m.starts_at);
+      if (!(dt >= wStart && dt <= wEnd)) return false;
+
+      return true;
+    })
     .map(m => ({
       ...m,
       distance_m: distanceMeters(userPos.lat, userPos.lon, m.venue.lat, m.venue.lon)
@@ -130,10 +139,125 @@ function render() {
   });
 }
 
+function startOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+function startOfWeekend(d) {
+  // samedi 00:00 (en heure locale)
+  const x = startOfDay(d);
+  const wd = x.getDay(); // 0 dim, 6 sam
+  const daysToSat = (6 - wd + 7) % 7;
+  return addDays(x, daysToSat);
+}
+
+function endOfWeekend(sat) {
+  // dimanche 23:59:59.999
+  const sun = addDays(sat, 1);
+  sun.setHours(23, 59, 59, 999);
+  return sun;
+}
+
+function fmtDateFR(d) {
+  return d.toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+}
+
+function buildMonthOptions() {
+  const monthSel = document.getElementById("month");
+  if (!monthSel) return;
+
+  monthSel.innerHTML = "";
+
+  // On propose : mois courant + 6 mois
+  const now = new Date();
+  const base = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(base.getFullYear(), base.getMonth() + i, 1);
+    const id = ym(d); // YYYY-MM
+    const label = d.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = label.charAt(0).toUpperCase() + label.slice(1);
+    monthSel.appendChild(opt);
+  }
+
+  // par défaut : mois courant
+  monthSel.value = ym(now);
+}
+
+function buildWeekendOptionsForSelectedMonth() {
+  const monthSel = document.getElementById("month");
+  const weekendSel = document.getElementById("weekend");
+  if (!monthSel || !weekendSel) return;
+
+  weekendSel.innerHTML = "";
+
+  const [Y, M] = monthSel.value.split("-").map(Number);
+  const monthStart = new Date(Y, M - 1, 1);
+  const monthEnd = new Date(Y, M, 0); // dernier jour du mois
+
+  // premier samedi qui tombe dans le mois (ou juste avant mais qui chevauche)
+  let sat = startOfWeekend(monthStart);
+
+  // si le samedi calculé est après la fin du mois, on recule d'une semaine (rare)
+  if (sat > monthEnd) sat = addDays(sat, -7);
+
+  // On parcourt les samedis jusqu'à dépasser le mois
+  while (sat <= monthEnd) {
+    const sun = addDays(sat, 1);
+    const label = `Week-end du ${fmtDateFR(sat)} → ${fmtDateFR(sun)}`;
+    const opt = document.createElement("option");
+    opt.value = sat.toISOString(); // on stocke le samedi
+    opt.textContent = label;
+    weekendSel.appendChild(opt);
+    sat = addDays(sat, 7);
+  }
+
+  // par défaut : prochain week-end
+  const nextSat = startOfWeekend(new Date());
+  weekendSel.value = nextSat.toISOString();
+}
+
+function getSelectedWeekendWindow() {
+  const weekendSel = document.getElementById("weekend");
+  if (!weekendSel || !weekendSel.value) {
+    const sat = startOfWeekend(new Date());
+    return { start: sat, end: endOfWeekend(sat) };
+  }
+  const sat = new Date(weekendSel.value);
+  return { start: sat, end: endOfWeekend(sat) };
+}
+
+
+
 async function boot() {
   $("count").textContent = "Initialisation…";
 
   const ok = initMap();
+    buildMonthOptions();
+  buildWeekendOptionsForSelectedMonth();
+
+  // charge le mois sélectionné
+  await loadMatchesForMonth(document.getElementById("month").value);
+  document.getElementById("month").addEventListener("change", async () => {
+    buildWeekendOptionsForSelectedMonth();
+    await loadMatchesForMonth(document.getElementById("month").value);
+    render();
+  });
+
+  document.getElementById("weekend").addEventListener("change", render);
+  $("level").addEventListener("change", render);
+  $("radius").addEventListener("change", render);
+
   if (!ok) return;
 
   // ✅ Affiche immédiatement avec la position par défaut (Saint-Quentin)
@@ -178,6 +302,7 @@ async function boot() {
 
 
 window.addEventListener("load", boot);
+
 
 
 
