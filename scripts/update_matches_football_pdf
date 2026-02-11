@@ -1,0 +1,233 @@
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from urllib.parse import urljoin
+
+import requests
+from pdfminer.high_level import extract_text
+
+PARIS = ZoneInfo("Europe/Paris")
+UTC = ZoneInfo("UTC")
+
+ROOT = Path(".")
+OUTDIR = ROOT / "data"
+PDFCACHE = ROOT / "pdf_cache"
+
+OUTDIR.mkdir(exist_ok=True)
+PDFCACHE.mkdir(exist_ok=True)
+
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "match-radar-hdf (github actions)",
+    "Accept-Language": "fr-FR,fr;q=0.9",
+})
+
+# ✅ Tes pages (on va y trouver les PDF)
+SOURCES = [
+    # N2 / N3
+    {"level": "N2", "competition": "National 2 - Poule B", "page": "https://epreuves.fff.fr/competition/engagement/439451-n2/phase/1/2/resultats-et-calendrier"},
+    {"level": "N3", "competition": "National 3 - Poule E", "page": "https://epreuves.fff.fr/competition/engagement/439452-n3/phase/1/5/resultats-et-calendrier"},
+
+    # R1
+    {"level": "R1", "competition": "R1 - Poule A", "page": "https://epreuves.fff.fr/competition/engagement/439189-seniors-regional-1/phase/1/1"},
+    {"level": "R1", "competition": "R1 - Poule B", "page": "https://epreuves.fff.fr/competition/engagement/439189-seniors-regional-1/phase/1/2"},
+
+    # R2
+    {"level": "R2", "competition": "R2 - Poule A", "page": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/1"},
+    {"level": "R2", "competition": "R2 - Poule B", "page": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/2"},
+    {"level": "R2", "competition": "R2 - Poule C", "page": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/3"},
+    {"level": "R2", "competition": "R2 - Poule D", "page": "https://epreuves.fff.fr/competition/engagement/439190-seniors-regional-2/phase/1/4"},
+
+    # R3
+    {"level": "R3", "competition": "R3 - Poule A", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/1"},
+    {"level": "R3", "competition": "R3 - Poule B", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/2"},
+    {"level": "R3", "competition": "R3 - Poule C", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/3"},
+    {"level": "R3", "competition": "R3 - Poule D", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/4"},
+    {"level": "R3", "competition": "R3 - Poule E", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/5"},
+    {"level": "R3", "competition": "R3 - Poule F", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/6"},
+    {"level": "R3", "competition": "R3 - Poule G", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/7"},
+    {"level": "R3", "competition": "R3 - Poule H", "page": "https://epreuves.fff.fr/competition/engagement/439191-seniors-regional-3/phase/1/8"},
+]
+
+# --- 1) Trouver les PDF depuis une page epreuves.fff.fr ----------------------
+
+PDF_HREF_RE = re.compile(r'href="([^"]+\.pdf)"', re.IGNORECASE)
+
+def fetch_text(url: str) -> str:
+    r = SESSION.get(url, timeout=35)
+    r.raise_for_status()
+    return r.text
+
+def find_pdfs_on_page(page_url: str) -> list[str]:
+    html = fetch_text(page_url)
+    pdfs = set()
+    for m in PDF_HREF_RE.finditer(html):
+        href = m.group(1)
+        pdfs.add(urljoin(page_url, href))
+    return sorted(pdfs)
+
+def download_pdf(url: str) -> Path:
+    # nom fichier stable (sans caractères bizarres)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", url.split("/")[-1])
+    path = PDFCACHE / safe
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    r = SESSION.get(url, timeout=60)
+    r.raise_for_status()
+    path.write_bytes(r.content)
+    return path
+
+# --- 2) Parser le texte PDF en matchs ----------------------------------------
+
+# Formats rencontrés souvent dans calendriers :
+# - dates: 14/02/2026 ou 14-02-2026
+# - heures: 18h00 / 18:00 / 18h
+DATE1 = re.compile(r"\b(\d{2})[/-](\d{2})[/-](\d{4})\b")
+TIME1 = re.compile(r"\b(\d{1,2})[:h](\d{2})\b|\b(\d{1,2})h\b", re.IGNORECASE)
+
+# Une ligne avec "Domicile - Extérieur" (ou "Domicile  Extérieur" selon extraction)
+VS1 = re.compile(r"(.+?)\s+-\s+(.+)", re.IGNORECASE)
+
+def guess_datetime(line: str) -> datetime | None:
+    d = DATE1.search(line)
+    if not d:
+        return None
+    day, mon, year = int(d.group(1)), int(d.group(2)), int(d.group(3))
+
+    hh, mm = 15, 0  # défaut si pas d’heure
+    t = TIME1.search(line)
+    if t:
+        if t.group(1) and t.group(2):
+            hh, mm = int(t.group(1)), int(t.group(2))
+        elif t.group(3):
+            hh, mm = int(t.group(3)), 0
+
+    return datetime(year, mon, day, hh, mm, tzinfo=PARIS)
+
+def clean_team(s: str) -> str:
+    s = re.sub(r"\s+", " ", s).strip()
+    # retire trucs parasites fréquents
+    s = s.replace("  ", " ")
+    return s
+
+def parse_pdf_to_items(pdf_path: Path, level: str, competition: str, source_url: str) -> list[dict]:
+    text = extract_text(str(pdf_path)) or ""
+    # normalise
+    text = text.replace("\x0c", "\n")
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+
+    items = []
+    # stratégie : repérer date+heure, puis chercher les équipes autour
+    for i, line in enumerate(lines):
+        dt = guess_datetime(line)
+        if not dt:
+            continue
+
+        # on inspecte une fenêtre de lignes après la date pour trouver "HOME - AWAY"
+        window = lines[i:i+6]
+        home, away = None, None
+
+        for w in window:
+            m = VS1.search(w)
+            if m:
+                a = clean_team(m.group(1))
+                b = clean_team(m.group(2))
+                # éviter les lignes trop courtes
+                if len(a) >= 3 and len(b) >= 3:
+                    home, away = a, b
+                    break
+
+        # fallback : parfois équipes sur 2 lignes consécutives
+        if not (home and away) and i+2 < len(lines):
+            a = lines[i+1]
+            b = lines[i+2]
+            if len(a) >= 3 and len(b) >= 3 and not DATE1.search(a) and not DATE1.search(b):
+                home, away = clean_team(a), clean_team(b)
+
+        if not (home and away):
+            continue
+
+        items.append({
+            "sport": "football",
+            "level": level,
+            "starts_at": dt.isoformat(),
+            "competition": competition,
+            "home_team": home,
+            "away_team": away,
+            "venue": {
+                "name": "Stade (à géocoder ensuite)",
+                "city": "",
+                "lat": 49.8489,
+                "lon": 3.2876
+            },
+            "source_url": source_url,
+        })
+
+    return items
+
+# --- 3) Sortie en fichiers data/YYYY-MM.json --------------------------------
+
+def bucket_by_month(items: list[dict]) -> dict[str, list[dict]]:
+    buckets: dict[str, list[dict]] = {}
+    for it in items:
+        dt = datetime.fromisoformat(it["starts_at"])
+        key = f"{dt.year:04d}-{dt.month:02d}"
+        buckets.setdefault(key, []).append(it)
+    for k in buckets:
+        buckets[k].sort(key=lambda x: x["starts_at"])
+    return buckets
+
+def write_month_files(buckets: dict[str, list[dict]]):
+    for ym, arr in buckets.items():
+        out = {
+            "updated_at": datetime.now(UTC).isoformat(),
+            "items": arr
+        }
+        (OUTDIR / f"{ym}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def main():
+    all_items = []
+    pdf_count = 0
+
+    for src in SOURCES:
+        pdf_urls = []
+        try:
+            pdf_urls = find_pdfs_on_page(src["page"])
+        except Exception as e:
+            print(f"[WARN] page KO: {src['page']} ({e})")
+            continue
+
+        if not pdf_urls:
+            print(f"[WARN] Aucun PDF trouvé sur: {src['page']}")
+            continue
+
+        print(f"[INFO] {src['level']} {src['competition']} => PDF trouvés: {len(pdf_urls)}")
+
+        # on prend tous les PDF trouvés (souvent 1-3)
+        for pdf_url in pdf_urls:
+            try:
+                pdf_path = download_pdf(pdf_url)
+                pdf_count += 1
+                items = parse_pdf_to_items(pdf_path, src["level"], src["competition"], pdf_url)
+                print(f"[INFO]   - {pdf_path.name} => matchs extraits: {len(items)}")
+                all_items.extend(items)
+            except Exception as e:
+                print(f"[WARN]   - PDF KO: {pdf_url} ({e})")
+
+    # dédup simple
+    uniq = {}
+    for it in all_items:
+        key = (it["starts_at"], it["home_team"], it["away_team"], it["level"])
+        uniq[key] = it
+    all_items = sorted(uniq.values(), key=lambda x: x["starts_at"])
+
+    buckets = bucket_by_month(all_items)
+    write_month_files(buckets)
+
+    print(f"[OK] PDFs traités={pdf_count} | matchs total={len(all_items)} | mois écrits={len(buckets)}")
+
+if __name__ == "__main__":
+    main()
