@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse, parse_qs, unquote_plus
 
 import requests
 
@@ -11,13 +12,14 @@ PARIS = ZoneInfo("Europe/Paris")
 UTC = ZoneInfo("UTC")
 
 OUT = Path("matches.json")
+GEOCACHE = Path("geocache.json")
 
 WINDOW_DAYS = 14
 
-# Garde-fous pour ne plus faire des runs interminables
-MAX_TEAM_PAGES_PER_COMP = 20          # max pages équipe à visiter par compétition
-MAX_CANDIDATES_PER_TEAM = 12          # max "match à venir" repérés par équipe
-SLEEP = 0.08
+# Anti “run infini”
+MAX_TEAMS_PER_COMP = 40       # large, mais suffisant
+MAX_MATCHES_PER_TEAM = 12     # on prend seulement les prochains matchs trouvés
+SLEEP = 0.10
 
 COMPETITIONS = [
     {"level": "N2", "competition": "National 2 - Poule B", "calendar_url": "https://epreuves.fff.fr/competition/engagement/439451-n2/phase/1/2/resultats-et-calendrier"},
@@ -47,7 +49,6 @@ SESSION.headers.update({
     "Accept-Language": "fr-FR,fr;q=0.9",
 })
 
-# Mois rencontrés sur les pages epreuves
 MONTHS = {
     "jan": 1, "janv": 1,
     "fév": 2, "fev": 2, "févr": 2, "fevr": 2,
@@ -63,38 +64,56 @@ MONTHS = {
     "déc": 12, "dec": 12,
 }
 
-# Ex: "sam 14 fév 2026 - 18h00" / "sam. 14 fév 2026 - 18h"
 DATE_RE = re.compile(
-    r"\b(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})?\b",
+    r"^(?:lun|mar|mer|jeu|ven|sam|dim)\.?\s+(\d{1,2})\s+([a-zéûôîàç\.]+)\s+(\d{4})\s+-\s+(\d{1,2})h(\d{2})?$",
     re.IGNORECASE
 )
 
-# Pages équipe
-TEAM_URL_RE = re.compile(
-    r'(https://epreuves\.fff\.fr)?(/competition/club/\d+[^"\'\s<]+/equipe/[^"\'\s<]+)',
+TEAM_PAGE_RE = re.compile(
+    r"(https://epreuves\.fff\.fr)?(/competition/club/\d+-[^\"'\s<]+/equipe/[^\"'\s<]+)",
     re.IGNORECASE
 )
 
-# Pages match
-MATCH_URL_RE = re.compile(
-    r'(https://epreuves\.fff\.fr)?(/competition/match/\d+[^"\'\s<]+)',
+CLUB_ROOT_RE = re.compile(
+    r"(https://epreuves\.fff\.fr)?(/competition/club/\d+-[^\"'\s<]+)",
     re.IGNORECASE
 )
+
+APPLE_MAPS_RE = re.compile(r'href="([^"]*maps\.apple\.com[^"]*)"', re.IGNORECASE)
 
 def fetch(url: str) -> str:
     r = SESSION.get(url, timeout=30)
     r.raise_for_status()
     return r.text
 
+def load_json(path: Path, default):
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return default
+
 def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def parse_fr_dt_from_snippet(snippet: str) -> datetime | None:
-    s = re.sub(r"\s+", " ", snippet.strip().lower())
+def normalize_space(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+def html_to_lines(html: str) -> list[str]:
+    # enlève scripts/styles
+    html = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
+    html = re.sub(r"(?is)<style.*?>.*?</style>", " ", html)
+    # remplace les tags par des retours ligne
+    text = re.sub(r"(?s)<[^>]+>", "\n", html)
+    # decode entités simples
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'")
+    lines = [normalize_space(x) for x in text.splitlines()]
+    return [x for x in lines if x]
+
+def parse_fr_datetime(line: str) -> datetime | None:
+    s = normalize_space(line.lower())
     s = s.replace("févr.", "févr").replace("fév.", "fév").replace("janv.", "janv")
     s = s.replace("sept.", "sept").replace("déc.", "déc").replace("août", "aoû")
 
-    m = DATE_RE.search(s)
+    m = DATE_RE.match(s)
     if not m:
         return None
     day = int(m.group(1))
@@ -108,82 +127,149 @@ def parse_fr_dt_from_snippet(snippet: str) -> datetime | None:
         return None
     return datetime(year, mon, day, hh, mm, tzinfo=PARIS)
 
+def is_time_token(s: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,2}:\d{2}", s))
+
+def is_score_token(s: str) -> bool:
+    # ex: "1 2" ou "0 0"
+    return bool(re.fullmatch(r"\d{1,2}\s+\d{1,2}", s))
+
 def extract_team_pages(comp_html: str) -> list[str]:
     links = set()
-    for m in TEAM_URL_RE.finditer(comp_html):
+    for m in TEAM_PAGE_RE.finditer(comp_html):
         links.add("https://epreuves.fff.fr" + m.group(2))
     return sorted(links)
 
-def extract_future_match_candidates_from_team_page(team_html: str, window_start: datetime, window_end: datetime) -> list[tuple[str, datetime]]:
-    """
-    On cherche des occurrences où la DATE et un lien /competition/match/... sont proches.
-    On ne va ouvrir la page match QUE si la date est dans la fenêtre.
-    """
-    candidates = []
-    # On parcourt les liens match et on prend un “contexte” autour pour trouver la date
-    for m in MATCH_URL_RE.finditer(team_html):
-        url = "https://epreuves.fff.fr" + m.group(2)
-        start = max(0, m.start() - 350)
-        end = min(len(team_html), m.end() + 350)
-        snippet = team_html[start:end]
+def club_root_from_team_page(team_url: str) -> str:
+    m = re.search(r"(https://epreuves\.fff\.fr)?(/competition/club/\d+-[^/]+)", team_url, re.IGNORECASE)
+    if not m:
+        return ""
+    return "https://epreuves.fff.fr" + m.group(2)
 
-        dt = parse_fr_dt_from_snippet(snippet)
+def try_coords_from_apple_maps(url: str) -> tuple[float, float] | None:
+    try:
+        u = urlparse(url)
+        qs = parse_qs(u.query)
+        # cas 1: ll=LAT,LON
+        if "ll" in qs and qs["ll"]:
+            ll = qs["ll"][0]
+            if "," in ll:
+                lat_s, lon_s = ll.split(",", 1)
+                return float(lat_s), float(lon_s)
+        # cas 2: query contient LAT,LON
+        for key in ("q", "address"):
+            if key in qs and qs[key]:
+                val = unquote_plus(qs[key][0])
+                m = re.search(r"(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)", val)
+                if m:
+                    return float(m.group(1)), float(m.group(2))
+    except Exception:
+        return None
+    return None
+
+def get_club_coords_and_city(club_url: str, geocache: dict) -> tuple[float, float, str]:
+    """
+    On essaie :
+    - coordonnées depuis les liens Apple Maps "Voir sur la carte" (souvent avec ll=lat,lon)
+    - sinon fallback: coord défaut Saint-Quentin
+    """
+    if club_url in geocache:
+        g = geocache[club_url]
+        return g["lat"], g["lon"], g.get("city", "")
+
+    lat, lon, city = 49.8489, 3.2876, ""  # défaut
+
+    try:
+        html = fetch(club_url)
+        # 1) Apple Maps
+        for m in APPLE_MAPS_RE.finditer(html):
+            amap = m.group(1)
+            coords = try_coords_from_apple_maps(amap)
+            if coords:
+                lat, lon = coords
+                break
+
+        # 2) Ville via lignes texte (best effort: prendre le code postal + ville dans "Coordonnées")
+        lines = html_to_lines(html)
+        for i, line in enumerate(lines):
+            if "Coordonnées" in line or "COORDONNEES" in line.upper():
+                # chercher une ligne contenant "75000 PARIS"
+                for j in range(i, min(i + 10, len(lines))):
+                    m2 = re.search(r"\b\d{5}\s+([A-ZÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ \-’']+)\b", lines[j])
+                    if m2:
+                        city = m2.group(1).title()
+                        break
+            if city:
+                break
+
+    except Exception:
+        pass
+
+    geocache[club_url] = {"lat": lat, "lon": lon, "city": city}
+    return lat, lon, city
+
+def extract_matches_from_team_page(team_url: str, level: str, competition: str, window_start: datetime, window_end: datetime) -> list[dict]:
+    """
+    On lit les lignes du HTML (sans JS) et on repère les blocs :
+      DATE
+      compétition (ex: "N2 - Senior Journée 18")
+      équipe A
+      (heure éventuelle "18:00")
+      équipe B
+    """
+    html = fetch(team_url)
+    lines = html_to_lines(html)
+
+    matches = []
+    i = 0
+    while i < len(lines):
+        dt = parse_fr_datetime(lines[i])
         if not dt:
+            i += 1
             continue
-        if window_start <= dt <= window_end:
-            candidates.append((url, dt))
 
-    # dédup + tri
-    uniq = {}
-    for url, dt in candidates:
-        uniq[url] = dt
-    out = sorted([(u, d) for u, d in uniq.items()], key=lambda x: x[1])
-    return out
+        # filtre fenêtre tout de suite
+        if not (window_start <= dt <= window_end):
+            i += 1
+            continue
 
-def parse_match_page(url: str) -> dict | None:
-    html = fetch(url)
+        # chercher les 2 équipes dans les prochaines lignes
+        teams = []
+        lookahead = lines[i+1:i+20]
+        for tok in lookahead:
+            if is_time_token(tok):
+                continue
+            if is_score_token(tok):
+                continue
+            low = tok.lower()
+            if "journée" in low or "journee" in low or "classement" in low or "navigation" in low:
+                continue
+            if low in ("dernier match", "prochain match", "saison", "mois précédent", "mois suivant"):
+                continue
+            # on garde des tokens “équipes” (souvent en MAJ)
+            if len(tok) >= 3 and re.search(r"[A-Za-zÀ-ÿ]", tok):
+                teams.append(tok)
+            if len(teams) >= 2:
+                break
 
-    # Date/heure : on rescanne la page match (plus fiable)
-    dt = parse_fr_dt_from_snippet(html)
-    if not dt:
-        return None
+        if len(teams) >= 2:
+            home_team = teams[0]
+            away_team = teams[1]
+            matches.append({
+                "starts_at": dt,
+                "home_team": home_team,
+                "away_team": away_team,
+                "level": level,
+                "competition": competition,
+                "team_page_url": team_url,
+            })
 
-    # Équipes via <title> : "Le match | HOME - AWAY"
-    title = re.search(r"<title>\s*Le match\s*\|\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
-    if not title:
-        return None
-    t = title.group(1).strip()
-    if " - " not in t:
-        return None
-    home, away = [x.strip() for x in t.split(" - ", 1)]
+        i += 1
 
-    # Stade/ville (best effort — on fera mieux ensuite)
-    venue_name = "Stade (à compléter)"
-    venue_city = ""
-    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
-    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+        if len(matches) >= MAX_MATCHES_PER_TEAM:
+            break
 
-    idx = text.lower().find("lieu de la rencontre")
-    if idx != -1:
-        chunk = text[idx: idx + 450]
-        # petit heuristic : prendre ce qui ressemble à un nom de stade
-        m_stade = re.search(r"(?i)\b(stade|terrain|complexe|parc)\b.{0,80}", chunk)
-        if m_stade:
-            venue_name = m_stade.group(0).strip()
-        m_city = re.search(r"\b\d{5}\s+([A-ZÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ \-’']{2,40})\b", chunk)
-        if m_city:
-            venue_city = m_city.group(1).title()
-
-    return {
-        "starts_at": dt,
-        "home_team": home,
-        "away_team": away,
-        "venue_name": venue_name,
-        "venue_city": venue_city,
-        "source_url": url,
-    }
+    return matches
 
 def main():
     now = datetime.now(PARIS)
@@ -191,87 +277,80 @@ def main():
     window_end = now + timedelta(days=WINDOW_DAYS)
     print(f"[INFO] Fenêtre: {window_start.isoformat()} -> {window_end.isoformat()}")
 
-    items = []
-    seen_match_urls = set()
+    geocache = load_json(GEOCACHE, {})
 
-    total_team_pages = 0
-    total_candidates = 0
-    opened_match_pages = 0
+    # On collecte des team pages, puis on extrait les matchs des team pages
+    all_items = []
+    seen_keys = set()
+
+    team_pages_total = 0
+    team_pages_opened = 0
 
     for comp in COMPETITIONS:
         try:
             comp_html = fetch(comp["calendar_url"])
         except Exception as e:
-            print(f"[WARN] fetch comp KO: {comp['calendar_url']} ({e})")
+            print(f"[WARN] fetch compétition KO: {comp['calendar_url']} ({e})")
             continue
 
-        team_pages = extract_team_pages(comp_html)[:MAX_TEAM_PAGES_PER_COMP]
-        total_team_pages += len(team_pages)
-        print(f"[INFO] {comp['level']} {comp['competition']} | team_pages={len(team_pages)}")
+        team_pages = extract_team_pages(comp_html)[:MAX_TEAMS_PER_COMP]
+        print(f"[INFO] {comp['level']} {comp['competition']} | team_pages trouvées={len(team_pages)}")
+        team_pages_total += len(team_pages)
 
         for tp in team_pages:
+            team_pages_opened += 1
             try:
-                thtml = fetch(tp)
+                found = extract_matches_from_team_page(
+                    tp, comp["level"], comp["competition"], window_start, window_end
+                )
             except Exception:
                 continue
 
-            cand = extract_future_match_candidates_from_team_page(thtml, window_start, window_end)
-            if not cand:
-                continue
+            for m in found:
+                dt = m["starts_at"]
 
-            total_candidates += len(cand)
-            cand = cand[:MAX_CANDIDATES_PER_TEAM]
-
-            for mu, dt_hint in cand:
-                if mu in seen_match_urls:
+                key = (dt.isoformat(), m["home_team"], m["away_team"], m["level"])
+                if key in seen_keys:
                     continue
-                seen_match_urls.add(mu)
+                seen_keys.add(key)
 
-                opened_match_pages += 1
-                mp = None
-                try:
-                    mp = parse_match_page(mu)
-                except Exception:
-                    mp = None
+                # venue = club du domicile
+                # on essaye de retrouver le club root depuis la team page (ça marche car URL contient /competition/club/ID-...)
+                club_url = club_root_from_team_page(tp)
+                lat, lon, city = get_club_coords_and_city(club_url, geocache) if club_url else (49.8489, 3.2876, "")
 
-                if not mp:
-                    continue
-
-                dt = mp["starts_at"]
-                if not (window_start <= dt <= window_end):
-                    continue
-
-                items.append({
+                all_items.append({
                     "sport": "football",
-                    "level": comp["level"],
+                    "level": m["level"],
                     "starts_at": dt.isoformat(),
-                    "competition": comp["competition"],
-                    "home_team": mp["home_team"],
-                    "away_team": mp["away_team"],
+                    "competition": m["competition"],
+                    "home_team": m["home_team"],
+                    "away_team": m["away_team"],
                     "venue": {
-                        "name": mp["venue_name"],
-                        "city": mp["venue_city"],
-                        # provisoire tant qu'on ne géocode pas
-                        "lat": 49.8489,
-                        "lon": 3.2876
+                        "name": "Stade (club domicile)",
+                        "city": city,
+                        "lat": lat,
+                        "lon": lon,
                     },
-                    "source_url": mp["source_url"],
+                    "source_url": tp,  # source = page équipe (fiable sans token)
                 })
 
-                time.sleep(SLEEP)
+            time.sleep(SLEEP)
 
-    # dédup + tri
-    uniq = {}
-    for it in items:
-        uniq[(it["starts_at"], it["home_team"], it["away_team"], it["level"])] = it
-    items = sorted(uniq.values(), key=lambda x: x["starts_at"])
+    all_items.sort(key=lambda x: x["starts_at"])
 
-    out = {"updated_at": datetime.now(UTC).isoformat(), "items": items}
+    save_json(GEOCACHE, geocache)
+
+    out = {
+        "updated_at": datetime.now(UTC).isoformat(),
+        "items": all_items,
+    }
     save_json(OUT, out)
 
-    print(f"[INFO] team_pages_total={total_team_pages} candidates_total={total_candidates} match_pages_opened={opened_match_pages}")
-    print(f"[OK] items={len(items)} (dans la fenêtre)")
+    print(f"[INFO] team_pages_total={team_pages_total} team_pages_opened={team_pages_opened}")
+    print(f"[OK] items={len(all_items)} (dans la fenêtre)")
     print("[OK] matches.json écrit")
 
 if __name__ == "__main__":
     main()
+
