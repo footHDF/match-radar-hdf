@@ -22,12 +22,12 @@ jobs:
         with:
           python-version: "3.11"
           
-      - name: Install dependencies
-        run: pip install requests
+            - name: Install deps
+        run: pip install -r requirements.txt
 
+      - name: Run updater (PDF)
+        run: python scripts/update_matches_football_pdf.py
 
-      - name: Run updater
-        run: python scripts/update_matches_football.py
 
       - name: Commit & push if changed
         run: |
