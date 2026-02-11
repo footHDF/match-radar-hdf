@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,9 +13,9 @@ UTC = ZoneInfo("UTC")
 OUT = Path("matches.json")
 WINDOW_DAYS = 14
 
-# ⚙️ limites anti-runs longs
-MAX_PAGES_PER_POULE = 4       # on ne pagine pas toute la saison
-MAX_POULES_PER_COMP = 2       # sécurité (au cas où l’API renvoie trop de poules)
+# Anti “runs interminables”
+MAX_PAGES_PER_POULE = 3
+MAX_POULES_PER_COMP = 1
 SLEEP = 0.06
 
 COMPETITIONS = [
@@ -51,6 +52,16 @@ SESSION.headers.update({
 def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def fetch_text(url: str) -> str:
+    r = SESSION.get(url, timeout=25)
+    r.raise_for_status()
+    return r.text
+
+def http_get_json(url: str):
+    r = SESSION.get(url, timeout=25)
+    r.raise_for_status()
+    return r.json()
+
 def as_list(payload):
     if isinstance(payload, list):
         return payload
@@ -64,30 +75,40 @@ def as_list(payload):
                 return payload[k]
     return []
 
-def http_get_json(url: str):
-    r = SESSION.get(url, timeout=25)
-    r.raise_for_status()
-    return r.json()
+def extract_token_from_epreuves() -> str | None:
+    """
+    On tente de récupérer un JWT dans le HTML de epreuves.fff.fr.
+    Plusieurs patterns possibles.
+    """
+    html = fetch_text("https://epreuves.fff.fr/")
+    # Pattern JWT typique : xxx.yyy.zzz (base64url)
+    jwt_candidates = re.findall(r"([A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})", html)
+    if jwt_candidates:
+        # on prend le plus long, souvent le vrai
+        jwt_candidates.sort(key=len, reverse=True)
+        return jwt_candidates[0]
 
-def get_bearer_token() -> str:
-    # Token public côté FFF (utilisé par leur site) :contentReference[oaicite:1]{index=1}
-    r = requests.get("https://www.fff.fr/api/dofa/token", timeout=25)
-    r.raise_for_status()
-    data = r.json()
-    token = data.get("token") or data.get("access_token") or data.get("jwt")
-    if not token:
-        raise RuntimeError("Token FFF introuvable dans la réponse https://www.fff.fr/api/dofa/token")
-    return token
+    # Pattern "token":"...."
+    m = re.search(r'"token"\s*:\s*"([^"]{20,})"', html)
+    if m:
+        return m.group(1)
 
-def choose_base_with_token() -> str:
-    # Endpoint “clairement connu” d’après la communauté : /api/clubs.json?page=1&filter= :contentReference[oaicite:2]{index=2}
+    # Pattern "accessToken":"...."
+    m = re.search(r'"accessToken"\s*:\s*"([^"]{20,})"', html)
+    if m:
+        return m.group(1)
+
+    return None
+
+def choose_base() -> str:
+    # endpoint test
     for base in BASE_URLS:
         try:
             _ = http_get_json(f"{base}/api/clubs.json?page=1&filter=")
             return base
         except Exception:
             continue
-    raise RuntimeError("API DOFA inaccessible même avec token (aucun base URL ne répond).")
+    raise RuntimeError("API DOFA inaccessible (test /api/clubs.json KO).")
 
 def iso_to_dt(s: str) -> datetime | None:
     try:
@@ -158,14 +179,17 @@ def main():
     window_end = now + timedelta(days=WINDOW_DAYS)
     print(f"[INFO] Fenêtre: {window_start.isoformat()} -> {window_end.isoformat()}")
 
-    # 1) Token
-    token = get_bearer_token()
-    SESSION.headers["Authorization"] = f"Bearer {token}"
-    print("[INFO] Token OK")
+    # 1) token depuis epreuves.fff.fr
+    token = extract_token_from_epreuves()
+    if token:
+        SESSION.headers["Authorization"] = f"Bearer {token}"
+        print("[INFO] Token trouvé sur epreuves.fff.fr")
+    else:
+        print("[WARN] Aucun token trouvé sur epreuves.fff.fr (on tente sans token)")
 
-    # 2) Base API OK ?
-    base = choose_base_with_token()
-    print(f"[INFO] API base utilisée: {base}")
+    # 2) base API
+    base = choose_base()
+    print(f"[INFO] API base: {base}")
 
     items = []
     poules_total = 0
@@ -178,7 +202,7 @@ def main():
             print(f"[WARN] Poules KO {comp['level']} {comp['competition']} ({e})")
             continue
 
-        poules = poules[:MAX_POULES_PER_COMP]  # garde-fou
+        poules = poules[:MAX_POULES_PER_COMP]
         poules_total += len(poules)
         print(f"[INFO] {comp['level']} {comp['competition']} | poules={len(poules)}")
 
@@ -193,7 +217,6 @@ def main():
                 continue
 
             mes_total += len(mes)
-
             for me in mes:
                 dt = extract_start_dt(me)
                 if not dt:
@@ -211,17 +234,10 @@ def main():
                     "competition": comp["competition"],
                     "home_team": home,
                     "away_team": away,
-                    "venue": {
-                        "name": venue_name,
-                        "city": city,
-                        # provisoire (on géocodera plus tard)
-                        "lat": 49.8489,
-                        "lon": 3.2876
-                    },
+                    "venue": {"name": venue_name, "city": city, "lat": 49.8489, "lon": 3.2876},
                     "source_url": "https://epreuves.fff.fr/"
                 })
 
-    # dédup + tri
     uniq = {}
     for it in items:
         uniq[(it["starts_at"], it["home_team"], it["away_team"], it["level"])] = it
@@ -231,9 +247,10 @@ def main():
     save_json(OUT, out)
 
     print(f"[INFO] poules_total={poules_total} match_entities_lus={mes_total}")
-    print(f"[OK] items={len(items)} (dans la fenêtre)")
+    print(f"[OK] items={len(items)}")
     print("[OK] matches.json écrit")
 
 if __name__ == "__main__":
     main()
+
 
