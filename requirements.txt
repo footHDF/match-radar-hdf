@@ -1,0 +1,2 @@
+pdfminer.six==20231228
+requests==2.32.3
