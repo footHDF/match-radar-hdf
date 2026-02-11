@@ -29,10 +29,10 @@ jobs:
         run: python scripts/update_matches_football_pdf.py
 
 
-      - name: Commit & push if changed
+            - name: Commit & push if changed
         run: |
           git config user.name "match-radar-bot"
           git config user.email "match-radar-bot@users.noreply.github.com"
-          git add matches.json
-          git diff --staged --quiet || git commit -m "Update matches.json (football)"
+          git add data/*.json
+          git diff --staged --quiet || git commit -m "Update monthly data (football)"
           git push
