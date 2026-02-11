@@ -7,6 +7,25 @@ function showMsg(txt) {
   el.textContent = txt;
 }
 
+async function geocodeAddress(q) {
+  // Nominatim (OpenStreetMap) — simple, sans clé
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+  const res = await fetch(url, { headers: { "Accept": "application/json" } });
+  if (!res.ok) throw new Error("Geocode HTTP " + res.status);
+  const arr = await res.json();
+  if (!arr || !arr.length) return null;
+  return { lat: Number(arr[0].lat), lon: Number(arr[0].lon), label: arr[0].display_name };
+}
+
+function setUserPos(lat, lon, label) {
+  userPos = { lat, lon };
+  map.setView([lat, lon], 9);
+  if (userMarker) userMarker.setLatLng([lat, lon]);
+  const posInfo = document.getElementById("posInfo");
+  if (posInfo) posInfo.textContent = label ? `Position : ${label}` : `Position : ${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+}
+
+
 function distanceMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (x) => x * Math.PI / 180;
@@ -258,6 +277,57 @@ async function boot() {
   $("level").addEventListener("change", render);
   $("radius").addEventListener("change", render);
 
+    const useGeo = document.getElementById("useGeo");
+  const btnPlace = document.getElementById("btnPlace");
+  const place = document.getElementById("place");
+
+  if (btnPlace && place) {
+    btnPlace.addEventListener("click", async () => {
+      const q = (place.value || "").trim();
+      if (!q) {
+        showMsg("Tape une ville/adresse puis clique OK.");
+        return;
+      }
+      try {
+        const p = await geocodeAddress(q);
+        if (!p) {
+          showMsg("Adresse introuvable. Essaie avec une ville (ex: Lille).");
+          return;
+        }
+        if (useGeo) useGeo.checked = false; // on force “adresse”
+        setUserPos(p.lat, p.lon, p.label);
+        render();
+      } catch (e) {
+        showMsg("Erreur géocodage (réseau bloqué ?) — essaie une ville plus simple.");
+      }
+    });
+  }
+
+  if (useGeo) {
+    useGeo.addEventListener("change", () => {
+      if (useGeo.checked) {
+        // relance la géoloc
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(
+            (p) => {
+              setUserPos(p.coords.latitude, p.coords.longitude, "Ma position");
+              render();
+            },
+            () => {
+              showMsg("Position refusée : garde la dernière position.");
+              useGeo.checked = false;
+            },
+            { enableHighAccuracy: true, timeout: 3000, maximumAge: 60000 }
+          );
+        } else {
+          showMsg("Géolocalisation indisponible.");
+          useGeo.checked = false;
+        }
+      }
+    });
+  }
+
+
   if (!ok) return;
 
   // ✅ Affiche immédiatement avec la position par défaut (Saint-Quentin)
@@ -302,6 +372,7 @@ async function boot() {
 
 
 window.addEventListener("load", boot);
+
 
 
 
