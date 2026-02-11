@@ -30,20 +30,26 @@ function fmtDate(iso) {
 
 let matches = [];
 
-async function loadMatches() {
+function ym(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+async function loadMatchesForMonth(ymStr) {
   try {
-    const res = await fetch("./matches.json", { cache: "no-store" });
+    // ex: ./data/2026-02.json
+    const res = await fetch(`./data/${ymStr}.json`, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
     const json = await res.json();
     matches = json.items || [];
-    if (document.getElementById("msg")) {
-      document.getElementById("msg").style.display = "block";
-      document.getElementById("msg").textContent = `Données chargées : ${matches.length} match(s)`;
-    }
+    showMsg(`Données chargées : ${matches.length} match(s) (${ymStr})`);
   } catch (e) {
-    showMsg("Impossible de charger matches.json (réseau/cache).");
     matches = [];
+    showMsg(`Impossible de charger ./data/${ymStr}.json (fichier manquant ?)`);
   }
 }
+
 
 
 
@@ -172,5 +178,6 @@ async function boot() {
 
 
 window.addEventListener("load", boot);
+
 
 
