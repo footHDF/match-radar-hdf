@@ -40,7 +40,24 @@
 
     </select>
 
-    <br><br>
+    <br>
+    <label class="lbl" for="place">Position (adresse / ville)</label>
+<div style="display:flex; gap:8px; align-items:center;">
+  <input id="place" class="inp" placeholder="ex: Saint-Quentin, Lille, 10 rue …" style="flex:1;">
+  <button id="btnPlace" class="btn" type="button">OK</button>
+</div>
+
+<div style="margin-top:6px;">
+  <label style="display:flex; gap:8px; align-items:center; font-size:13px;">
+    <input type="checkbox" id="useGeo" checked>
+    Utiliser ma position (si autorisée)
+  </label>
+</div>
+
+<div id="posInfo" style="font-size:12px; opacity:.8; margin-top:6px;"></div>
+
+    
+    <br>
 
     <label>Rayon</label><br>
     <select id="radius">
@@ -66,5 +83,6 @@
 
 </body>
 </html>
+
 
 
